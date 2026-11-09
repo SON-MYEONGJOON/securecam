@@ -1,0 +1,747 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>홈 보안캠</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --fg:#e8eaf0; --mut:#9aa3b2; --acc:#4f8cff; --ok:#2fbf71; --warn:#f5a524; --bad:#ef4f4f; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 system-ui, -apple-system, "Noto Sans KR", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 12px 16px 80px; }
+  h1 { font-size: 20px; margin: 4px 0 12px; display:flex; align-items:center; gap:8px; }
+  h2 { font-size: 16px; margin: 0 0 10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:12px; }
+  label { display:block; font-size:13px; color:var(--mut); margin:10px 0 4px; }
+  input, select { width:100%; padding:10px; background:#0c0e12; color:var(--fg); border:1px solid var(--line); border-radius:8px; font-size:15px; }
+  input[type=checkbox] { width:auto; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; }
+  .row > * { flex:1 1 140px; }
+  button { padding:10px 14px; border:0; border-radius:8px; background:#2a3140; color:var(--fg); font-size:15px; cursor:pointer; }
+  button.primary { background:var(--acc); color:#fff; font-weight:600; }
+  button.danger { background:var(--bad); color:#fff; }
+  button:disabled { opacity:.5; }
+  .hint { font-size:12px; color:var(--mut); margin-top:6px; }
+  .stage { position:relative; background:#000; border-radius:12px; overflow:hidden; aspect-ratio: 4/3; }
+  .stage video, .stage canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; background:#2a3140; }
+  .badge.ok { background:var(--ok); color:#000; } .badge.warn { background:var(--warn); color:#000; } .badge.bad { background:var(--bad); }
+  #statusBar { position:absolute; left:8px; top:8px; right:8px; display:flex; gap:6px; flex-wrap:wrap; pointer-events:none; }
+  #log { max-height: 260px; overflow:auto; font-size:13px; }
+  #log div { padding:4px 0; border-bottom:1px solid var(--line); color:var(--mut); }
+  #log div b { color:var(--fg); font-weight:500; }
+  .people { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+  .people .p { display:flex; justify-content:space-between; align-items:center; background:#0c0e12; border:1px solid var(--line); border-radius:8px; padding:6px 10px; }
+  #blackout { position:fixed; inset:0; background:#000; z-index:50; display:none; color:#333; align-items:flex-end; justify-content:center; padding:24px; font-size:12px; }
+  details summary { cursor:pointer; color:var(--mut); }
+  .hidden { display:none !important; }
+  /* viewer */
+  #viewer video { width:100%; background:#000; border-radius:12px; }
+</style>
+</head>
+<body>
+
+<!-- ============ 카메라 모드 ============ -->
+<main id="camApp" class="hidden">
+  <h1>📷 홈 보안캠 <span id="armBadge" class="badge">대기</span></h1>
+
+  <div class="stage card" style="padding:0">
+    <video id="video" playsinline muted autoplay></video>
+    <canvas id="overlay"></canvas>
+    <div id="statusBar"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button id="btnStart" class="primary">감시 시작</button>
+      <button id="btnStop" class="danger" disabled>감시 중지</button>
+      <button id="btnBlack" title="화면을 검게 해서 전력 절약 (탭하면 복귀)">화면 어둡게</button>
+    </div>
+    <div class="hint" id="loadHint">AI 모델을 아직 불러오지 않았습니다. 처음 시작할 때 20~40MB를 내려받습니다.</div>
+  </div>
+
+  <div class="card">
+    <h2>👤 제외할 사람 (본인·가족)</h2>
+    <div class="row">
+      <input id="ownerName" placeholder="이름 (예: 나)">
+      <button id="btnEnroll">얼굴 등록</button>
+    </div>
+    <div class="hint">카메라를 정면으로 3~5초간 바라보세요. 화면에 얼굴이 하나만 있어야 합니다. 안경 쓴 모습과 벗은 모습, 낮과 밤 조명에서 여러 번 등록하면 정확도가 올라갑니다.</div>
+    <div class="people" id="peopleList"></div>
+  </div>
+
+  <div class="card">
+    <h2>✈️ 텔레그램 알림</h2>
+    <label>봇 토큰 (BotFather에서 발급)</label>
+    <input id="tgToken" placeholder="123456789:ABC..." autocomplete="off">
+    <label>Chat ID</label>
+    <div class="row">
+      <input id="tgChat" placeholder="봇에게 /start 보낸 뒤 '찾기'">
+      <button id="btnFindChat" style="flex:0 0 auto">찾기</button>
+      <button id="btnTestTg" style="flex:0 0 auto">테스트</button>
+    </div>
+    <div class="hint">받을 휴대폰의 텔레그램에서 내 봇에게 아무 메시지나 보낸 뒤 '찾기'를 누르세요.</div>
+  </div>
+
+  <div class="card">
+    <h2>⚙️ 감지 설정</h2>
+    <div class="row">
+      <div><label>카메라</label><select id="camFacing"><option value="environment">후면</option><option value="user">전면</option></select></div>
+      <div><label>해상도</label><select id="camRes"><option value="640x480">640×480 (권장)</option><option value="1280x720">1280×720</option></select></div>
+      <div><label>AI 처리</label><select id="aiDelegate"><option value="CPU">CPU (안정, 권장)</option><option value="GPU">GPU (빠름, 일부 기기 오작동)</option></select><div class="hint" style="margin:2px 0 0">변경 후 새로고침</div></div>
+    </div>
+    <div class="row">
+      <div><label>본인이 있을 때</label>
+        <select id="ownerMode">
+          <option value="any">본인이 포함된 이벤트는 알리지 않음</option>
+          <option value="only">본인만 있을 때만 알리지 않음 (낯선 얼굴 함께 있으면 알림)</option>
+        </select></div>
+    </div>
+    <div class="row">
+      <div><label>본인 확인 후 무시 시간 (분)</label><input id="graceMin" type="number" min="0" max="240" value="10"></div>
+      <div><label>사라짐 판정 (초)</label><input id="endSec" type="number" min="2" max="60" value="6"></div>
+    </div>
+    <div class="row">
+      <div><label>얼굴 일치 기준 (0.3~0.9)</label><input id="matchThr" type="number" step="0.01" min="0.3" max="0.9" value="0.55"></div>
+      <div><label>사람 감지 민감도 (0.2~0.8)</label><input id="personThr" type="number" step="0.05" min="0.2" max="0.8" value="0.45"></div>
+    </div>
+    <div class="row">
+      <div><label>최대 녹화 길이 (초)</label><input id="maxClip" type="number" min="10" max="300" value="90"></div>
+      <div><label>최소 이벤트 길이 (초)</label><input id="minEvent" type="number" step="0.5" min="0" max="20" value="1.5"></div>
+    </div>
+    <label><input id="instantAlert" type="checkbox"> 낯선 얼굴이 보이면 사라지기 전에 사진 먼저 보내기</label>
+    <div class="hint">'본인 확인 후 무시 시간': 본인 얼굴이 확인되면 이 시간 동안은 얼굴이 안 보이는 움직임(뒷모습 등)도 본인으로 간주합니다. 외출할 때는 텔레그램에서 /arm 을 보내면 바로 해제됩니다. 녹화는 영상만 하고 소리는 녹음하지 않습니다.</div>
+  </div>
+
+  <div class="card">
+    <h2>📡 실시간 보기</h2>
+    <div class="hint" id="liveInfo">감시를 시작하면 실시간 보기 링크가 만들어집니다. 텔레그램에서 /live 를 보내도 링크를 받을 수 있습니다.</div>
+    <div class="row" style="margin-top:8px"><button id="btnCopyLive" disabled>링크 복사</button><button id="btnResetLive">링크 새로 만들기</button></div>
+  </div>
+
+  <div class="card">
+    <h2>📝 기록</h2>
+    <div id="log"></div>
+  </div>
+</main>
+
+<!-- ============ 뷰어 모드 ============ -->
+<main id="viewer" class="hidden">
+  <h1>📡 보안캠 실시간 보기 <span id="vBadge" class="badge">연결 중</span></h1>
+  <video id="vVideo" playsinline autoplay muted controls></video>
+  <div class="row" style="margin-top:10px">
+    <button id="vReconnect">다시 연결</button>
+    <button id="vSnap">사진 저장</button>
+  </div>
+  <div class="hint" id="vHint">카메라 휴대폰과 P2P(WebRTC)로 연결합니다. 일부 모바일 데이터망에서는 연결이 안 될 수 있습니다. 그럴 땐 텔레그램에서 /snap 이나 /clip 을 사용하세요.</div>
+</main>
+
+<div id="blackout">감시 중 · 화면을 탭하면 돌아옵니다</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.5/dist/peerjs.min.js"></script>
+<script type="module">
+const HUMAN_VER = '3.3.6';
+const HUMAN_URL = `https://cdn.jsdelivr.net/npm/@vladmandic/human@${HUMAN_VER}/dist/human.esm.js`;
+const MODEL_BASE = `https://cdn.jsdelivr.net/npm/@vladmandic/human@${HUMAN_VER}/models/`;
+const MP_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.1.1';
+const MP_MODEL = 'https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite';
+const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const pad = (n) => String(n).padStart(2, '0');
+const fmtTime = (t) => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+const fmtDT = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${fmtTime(t)}`; };
+
+// ---------- 저장소 (이 휴대폰의 브라우저에만 저장됨) ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('scam.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('scam.' + k, JSON.stringify(v)); } catch (e) { console.warn('저장 실패', e); } },
+};
+
+const hashParams = new URLSearchParams(location.hash.slice(1));
+if (hashParams.has('view')) startViewer(hashParams.get('view'), hashParams.get('k'));
+else startCamera();
+
+// =====================================================================
+//  뷰어 모드 (다른 휴대폰)
+// =====================================================================
+function startViewer(camId, key) {
+  $('viewer').classList.remove('hidden');
+  const video = $('vVideo'), badge = $('vBadge');
+  let peer, timer;
+  const setBadge = (t, cls) => { badge.textContent = t; badge.className = 'badge ' + (cls || ''); };
+
+  function connect() {
+    clearTimeout(timer);
+    if (peer) try { peer.destroy(); } catch {}
+    setBadge('연결 중');
+    peer = new Peer();
+    peer.on('open', () => {
+      const conn = peer.connect(camId, { reliable: true });
+      conn.on('open', () => conn.send({ type: 'hello', k: key }));
+      conn.on('data', (d) => { if (d && d.type === 'denied') setBadge('인증 실패', 'bad'); if (d && d.type === 'busy') setBadge('접속자 초과', 'warn'); });
+      conn.on('close', () => { setBadge('끊김', 'warn'); timer = setTimeout(connect, 5000); });
+    });
+    peer.on('call', (call) => {
+      call.answer();
+      call.on('stream', (s) => { video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok'); });
+      call.on('close', () => setBadge('끊김', 'warn'));
+    });
+    peer.on('error', (e) => {
+      setBadge(e.type === 'peer-unavailable' ? '카메라 꺼짐' : '오류', 'bad');
+      timer = setTimeout(connect, 8000);
+    });
+  }
+  $('vReconnect').onclick = connect;
+  $('vSnap').onclick = () => {
+    if (!video.videoWidth) return;
+    const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    const a = document.createElement('a'); a.download = `securecam-${Date.now()}.jpg`; a.href = c.toDataURL('image/jpeg', 0.9); a.click();
+  };
+  connect();
+}
+
+// =====================================================================
+//  카메라 모드 (감시용 휴대폰)
+// =====================================================================
+async function startCamera() {
+  $('camApp').classList.remove('hidden');
+  const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
+
+  // ---- 설정 ----
+  const FIELDS = ['tgToken','tgChat','camFacing','camRes','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert'];
+  const saved = store.get('settings', {});
+  for (const f of FIELDS) {
+    const el = $(f); if (saved[f] === undefined) continue;
+    if (el.type === 'checkbox') el.checked = !!saved[f]; else el.value = saved[f];
+  }
+  const S = {};
+  function readSettings() {
+    for (const f of FIELDS) { const el = $(f); S[f] = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value.trim()); }
+    store.set('settings', S);
+  }
+  FIELDS.forEach(f => $(f).addEventListener('change', readSettings));
+  readSettings();
+
+  // ---- 등록된 사람 ----
+  let people = store.get('people', []); // [{name, samples:[[...embedding]]}]
+  function renderPeople() {
+    const box = $('peopleList'); box.innerHTML = '';
+    if (!people.length) { box.innerHTML = '<div class="hint">아직 등록된 사람이 없습니다. 등록하지 않으면 모든 사람에 대해 알림을 보냅니다.</div>'; return; }
+    people.forEach((p, i) => {
+      const d = document.createElement('div'); d.className = 'p';
+      d.innerHTML = `<span>${escapeHtml(p.name)} <span class="hint">· 샘플 ${p.samples.length}개</span></span>`;
+      const b = document.createElement('button'); b.textContent = '삭제'; b.onclick = () => { if (confirm(`${p.name} 을(를) 삭제할까요?`)) { people.splice(i, 1); store.set('people', people); renderPeople(); } };
+      d.appendChild(b); box.appendChild(d);
+    });
+  }
+  renderPeople();
+
+  // ---- 로그 ----
+  function log(msg, strong) {
+    const d = document.createElement('div');
+    d.innerHTML = `${fmtTime(Date.now())} ${strong ? '<b>' + escapeHtml(msg) + '</b>' : escapeHtml(msg)}`;
+    $('log').prepend(d);
+    while ($('log').children.length > 200) $('log').lastChild.remove();
+  }
+
+  // ---- 상태 ----
+  let stream = null, human = null, match = null, personDet = null;
+  let armed = false, running = false;
+  let graceUntil = 0;                // 본인 확인 후 무시 만료 시각
+  let ev = null;                     // 진행 중 이벤트
+  let recentPerson = [];             // 최근 감지 결과 (등장 판정용)
+  let enrolling = null;              // 얼굴 등록 중 상태
+  let lastFaces = [];                // 오버레이용
+
+  const statusBar = $('statusBar');
+  function setStatus(items) { statusBar.innerHTML = items.map(([t, c]) => `<span class="badge ${c || ''}">${escapeHtml(t)}</span>`).join(''); }
+  function setArmBadge() {
+    const b = $('armBadge');
+    if (!running) { b.textContent = '대기'; b.className = 'badge'; return; }
+    if (!armed) { b.textContent = '일시정지'; b.className = 'badge warn'; return; }
+    if (Date.now() < graceUntil) { b.textContent = `본인 있음 (~${fmtTime(graceUntil).slice(0,5)})`; b.className = 'badge warn'; return; }
+    b.textContent = '감시 중'; b.className = 'badge ok';
+  }
+
+  // ---- 카메라 ----
+  async function openCamera() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    const [w, h] = S.camRes.split('x').map(Number);
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: { facingMode: { ideal: S.camFacing }, width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 15, max: 20 } },
+    });
+    video.srcObject = stream;
+    await video.play();
+    await new Promise(r => video.videoWidth ? r() : video.onloadedmetadata = r);
+    overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+    if (live.peer) live.refreshCalls();
+  }
+
+  // ---- AI 모델 ----
+  async function loadModels() {
+    if (human) return;
+    $('loadHint').textContent = 'AI 모델 불러오는 중… (처음 한 번은 1~2분 걸릴 수 있음)';
+    const mod = await import(HUMAN_URL);
+    match = mod.match;
+    human = new mod.Human({
+      modelBasePath: MODEL_BASE,
+      backend: 'webgl',
+      debug: false,
+      cacheSensitivity: 0,
+      filter: { enabled: true, equalization: true, flip: false },
+      face: {
+        enabled: true,
+        detector: { rotation: false, maxDetected: 5, minConfidence: 0.35, return: false },
+        mesh: { enabled: true }, iris: { enabled: false }, description: { enabled: true },
+        emotion: { enabled: false }, antispoof: { enabled: false }, liveness: { enabled: false }, attention: { enabled: false },
+      },
+      body: { enabled: false }, hand: { enabled: false }, gesture: { enabled: false }, segmentation: { enabled: false },
+      object: { enabled: false },
+    });
+    await human.load();
+    await human.warmup();
+    // 사람(몸 전체) 감지: MediaPipe EfficientDet
+    const mp = await import(MP_URL + '/vision_bundle.mjs');
+    const fileset = await mp.FilesetResolver.forVisionTasks(MP_URL + '/wasm');
+    personDet = await mp.ObjectDetector.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: MP_MODEL, delegate: S.aiDelegate || 'CPU' },
+      runningMode: 'VIDEO', scoreThreshold: 0.2, categoryAllowlist: ['person'], maxResults: 6,
+    });
+    $('loadHint').textContent = `AI 준비 완료 (백엔드: ${human.tf?.getBackend?.() || '?'})`;
+    log('AI 모델 준비 완료');
+  }
+
+  // ---- 얼굴 비교 ----
+  function identify(embedding) {
+    let best = { name: null, sim: 0 };
+    if (!embedding || !embedding.length) return best;
+    for (const p of people) for (const s of p.samples) {
+      const sim = match.similarity(embedding, s);
+      if (sim > best.sim) best = { name: p.name, sim };
+    }
+    return best;
+  }
+
+  // ---- 움직임 감지 (가벼운 사전 필터) ----
+  const mCan = document.createElement('canvas'); mCan.width = 64; mCan.height = 48;
+  const mCtx = mCan.getContext('2d', { willReadFrequently: true });
+  let prevGray = null;
+  function motionScore() {
+    mCtx.drawImage(video, 0, 0, 64, 48);
+    const d = mCtx.getImageData(0, 0, 64, 48).data;
+    const g = new Uint8Array(64 * 48);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * 3 + d[i + 1] * 6 + d[i + 2]) / 10;
+    let changed = 0;
+    if (prevGray) for (let i = 0; i < g.length; i++) if (Math.abs(g[i] - prevGray[i]) > 22) changed++;
+    prevGray = g;
+    return changed / g.length;
+  }
+
+  // ---- 스냅샷 ----
+  const snapCan = document.createElement('canvas');
+  function snapshot(boxes = []) {
+    snapCan.width = video.videoWidth; snapCan.height = video.videoHeight;
+    const c = snapCan.getContext('2d');
+    c.drawImage(video, 0, 0);
+    c.lineWidth = Math.max(2, snapCan.width / 250); c.font = `${Math.round(snapCan.width / 32)}px sans-serif`;
+    for (const b of boxes) {
+      c.strokeStyle = b.color; c.strokeRect(...b.box);
+      if (b.label) { c.fillStyle = b.color; c.fillText(b.label, b.box[0] + 4, Math.max(16, b.box[1] - 6)); }
+    }
+    c.fillStyle = 'rgba(0,0,0,.55)'; c.fillRect(0, snapCan.height - 28, 220, 28);
+    c.fillStyle = '#fff'; c.font = '16px sans-serif'; c.fillText(fmtDT(Date.now()), 6, snapCan.height - 9);
+    return new Promise(r => snapCan.toBlob(r, 'image/jpeg', 0.85));
+  }
+
+  // ---- 녹화 ----
+  const MIME = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp8', 'video/webm'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+  function startRecorder(maxSec) {
+    if (!window.MediaRecorder) return null;
+    const chunks = [];
+    const rec = new MediaRecorder(stream, MIME ? { mimeType: MIME, videoBitsPerSecond: 900_000 } : undefined);
+    rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    const done = new Promise(r => rec.onstop = () => r(new Blob(chunks, { type: rec.mimeType || MIME || 'video/webm' })));
+    rec.start(1000);
+    const t = setTimeout(() => rec.state !== 'inactive' && rec.stop(), maxSec * 1000);
+    return { rec, done, stop() { clearTimeout(t); if (rec.state !== 'inactive') rec.stop(); return done; } };
+  }
+
+  // ---- 텔레그램 ----
+  const tgReady = () => S.tgToken && S.tgChat;
+  async function tgCall(method, params = {}, file) {
+    const fd = new FormData();
+    for (const [k, v] of Object.entries(params)) fd.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    if (file) fd.append(file.field, file.blob, file.name);
+    const res = await fetch(`https://api.telegram.org/bot${S.tgToken}/${method}`, { method: 'POST', body: fd });
+    const j = await res.json();
+    if (!j.ok) throw new Error(j.description || 'Telegram 오류');
+    return j.result;
+  }
+  let tgQueue = Promise.resolve();
+  function tgSend(method, params, file) {
+    if (!tgReady()) return Promise.resolve();
+    const job = async () => {
+      for (let i = 0; i < 4; i++) {
+        try { return await tgCall(method, { chat_id: S.tgChat, ...params }, file); }
+        catch (e) { log(`텔레그램 전송 실패 (${i + 1}/4): ${e.message}`); await sleep(3000 * (i + 1)); }
+      }
+    };
+    tgQueue = tgQueue.then(job, job);
+    return tgQueue;
+  }
+  const tgText = (text) => tgSend('sendMessage', { text });
+  const tgPhoto = (blob, caption) => tgSend('sendPhoto', { caption }, { field: 'photo', blob, name: 'snap.jpg' });
+  function tgVideo(blob, caption) {
+    const mp4 = blob.type.includes('mp4');
+    if (blob.size > 49 * 1024 * 1024) return tgText('⚠️ 영상이 50MB를 넘어 전송하지 못했습니다.');
+    return mp4
+      ? tgSend('sendVideo', { caption, supports_streaming: true }, { field: 'video', blob, name: 'clip.mp4' })
+      : tgSend('sendDocument', { caption }, { field: 'document', blob, name: 'clip.webm' });
+  }
+  function tgBeacon(text) { // 화면이 꺼지는 순간 등 fetch가 안 될 때
+    if (!tgReady()) return;
+    navigator.sendBeacon(`https://api.telegram.org/bot${S.tgToken}/sendMessage?chat_id=${encodeURIComponent(S.tgChat)}&text=${encodeURIComponent(text)}`);
+  }
+
+  // 텔레그램 명령 수신 (/status /snap /clip /live /arm /disarm)
+  let pollOffset = 0, polling = false;
+  async function pollCommands() {
+    if (polling) return; polling = true;
+    try { const u = await tgCall('getUpdates', { offset: -1, timeout: 0 }); if (u.length) pollOffset = u[u.length - 1].update_id + 1; } catch {}
+    while (running && tgReady()) {
+      try {
+        const ups = await tgCall('getUpdates', { offset: pollOffset, timeout: 25, allowed_updates: ['message'] });
+        for (const u of ups) {
+          pollOffset = u.update_id + 1;
+          const m = u.message; if (!m || !m.text) continue;
+          if (String(m.chat.id) !== String(S.tgChat)) continue; // 등록된 채팅만 허용
+          handleCommand(m.text.trim().split(/\s+/)[0].split('@')[0].toLowerCase());
+        }
+      } catch (e) { await sleep(5000); }
+    }
+    polling = false;
+  }
+  async function handleCommand(cmd) {
+    if (cmd === '/snap') { tgPhoto(await snapshot(), `📸 현재 화면 · ${fmtDT(Date.now())}`); }
+    else if (cmd === '/clip') { tgText('🎥 10초 녹화 중…'); const r = startRecorder(10); if (r) tgVideo(await r.done, `🎥 요청 영상 · ${fmtDT(Date.now())}`); }
+    else if (cmd === '/live') { tgText(live.url ? `📡 실시간 보기:\n${live.url}` : '실시간 보기 연결이 아직 준비되지 않았습니다.'); }
+    else if (cmd === '/arm') { armed = true; graceUntil = 0; setArmBadge(); log('텔레그램: 감시 재개 (/arm)', true); tgText('🟢 감시를 재개했습니다. 본인 무시 시간도 해제했습니다.'); }
+    else if (cmd === '/disarm') { armed = false; setArmBadge(); log('텔레그램: 일시정지 (/disarm)', true); tgText('⏸️ 알림을 일시정지했습니다. /arm 으로 재개합니다.'); }
+    else if (cmd === '/status') { tgText(await statusText()); }
+    else tgText('명령어:\n/status 상태\n/snap 지금 사진\n/clip 10초 영상\n/live 실시간 보기 링크\n/arm 감시 재개(본인 무시 해제)\n/disarm 알림 일시정지');
+  }
+  async function statusText() {
+    let bat = '';
+    try { const b = await navigator.getBattery(); bat = `\n배터리: ${Math.round(b.level * 100)}% ${b.charging ? '(충전 중)' : '(충전 안 함!)'}`; } catch {}
+    const g = Date.now() < graceUntil ? `\n본인 무시 중: ${fmtTime(graceUntil)}까지` : '';
+    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
+  }
+
+  // ---- 실시간 보기 (PeerJS / WebRTC) ----
+  const live = {
+    peer: null, url: '', calls: new Set(), MAX: 3,
+    id: store.get('liveId', null), key: store.get('liveKey', null),
+    ensureIds() {
+      if (!this.id) { this.id = 'scam-' + rand(20); store.set('liveId', this.id); }
+      if (!this.key) { this.key = rand(16); store.set('liveKey', this.key); }
+      this.url = `${location.origin}${location.pathname}#view=${this.id}&k=${this.key}`;
+    },
+    start() {
+      if (typeof Peer === 'undefined') { $('liveInfo').textContent = '실시간 보기 라이브러리를 불러오지 못했습니다.'; return; }
+      this.ensureIds(); this.stop();
+      const peer = this.peer = new Peer(this.id);
+      peer.on('open', () => { $('liveInfo').textContent = '실시간 보기 준비됨. 링크를 받을 휴대폰으로 보내세요 (텔레그램 /live).'; $('btnCopyLive').disabled = false; });
+      peer.on('connection', (conn) => {
+        conn.on('data', (d) => {
+          if (!d || d.type !== 'hello') return;
+          if (d.k !== this.key) { conn.send({ type: 'denied' }); setTimeout(() => conn.close(), 500); log('실시간 보기: 잘못된 키로 접속 시도'); return; }
+          if (this.calls.size >= this.MAX) { conn.send({ type: 'busy' }); return; }
+          const call = peer.call(conn.peer, stream);
+          call.viewer = conn.peer; this.calls.add(call); log('실시간 보기 접속');
+          const end = () => { this.calls.delete(call); };
+          call.on('close', end); call.on('error', end); conn.on('close', () => { try { call.close(); } catch {} end(); });
+        });
+      });
+      peer.on('disconnected', () => { setTimeout(() => { if (this.peer === peer && !peer.destroyed) peer.reconnect(); }, 3000); });
+      peer.on('error', (e) => {
+        if (e.type === 'unavailable-id') { $('liveInfo').textContent = '이전 연결 정리 중… 잠시 후 재시도'; setTimeout(() => running && this.start(), 15000); }
+        else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) setTimeout(() => running && this.start(), 15000);
+      });
+    },
+    refreshCalls() { // 카메라를 다시 열었을 때 기존 시청자에게 새 영상 전달
+      for (const c of this.calls) { try { const s = c.peerConnection.getSenders().find(x => x.track && x.track.kind === 'video'); s && s.replaceTrack(stream.getVideoTracks()[0]); } catch {} }
+    },
+    stop() { if (this.peer) { try { this.peer.destroy(); } catch {} } this.peer = null; this.calls.clear(); },
+  };
+  $('btnCopyLive').onclick = async () => { live.ensureIds(); try { await navigator.clipboard.writeText(live.url); alert('복사했습니다'); } catch { prompt('링크', live.url); } };
+  $('btnResetLive').onclick = () => {
+    if (!confirm('기존 실시간 보기 링크가 더 이상 작동하지 않게 됩니다. 새로 만들까요?')) return;
+    store.set('liveId', null); store.set('liveKey', null); live.id = live.key = null;
+    if (running) live.start(); else live.ensureIds();
+    log('실시간 보기 링크를 새로 만들었습니다', true);
+  };
+
+  // ---- 이벤트 처리 ----
+  async function beginEvent(now, persons) {
+    ev = { start: now, lastSeen: now, maxPersons: persons.length, ownerHits: 0, ownerNames: new Set(), strangerHits: 0, noFaceFrames: 0,
+           bestSnap: null, bestScore: -1, lastSnapAt: 0, instantSent: false,
+           rec: startRecorder(S.maxClip) };
+    log(`사람 등장 (${persons.length}명)`, true);
+  }
+
+  async function endEvent(now) {
+    const e = ev; ev = null; recentPerson = [];
+    const clip = e.rec ? await e.rec.stop() : null;
+    const dur = (e.lastSeen - e.start) / 1000;
+    const ownerPresent = e.ownerHits >= 2;
+    let suppress = false, reason = '';
+    if (dur < S.minEvent) { suppress = true; reason = '너무 짧음'; }
+    else if (!armed) { suppress = true; reason = '일시정지 상태'; }
+    else if (S.ownerMode === 'any' && ownerPresent) { suppress = true; reason = `본인 포함 (${[...e.ownerNames].join(', ')})`; }
+    else if (S.ownerMode === 'only' && ownerPresent && e.strangerHits === 0) { suppress = true; reason = `본인만 있음 (${[...e.ownerNames].join(', ')})`; }
+    else if (e.startedInGrace && e.strangerHits === 0) { suppress = true; reason = '본인 무시 시간 중 (얼굴 미확인 움직임)'; }
+    else if (e.startedInGrace && S.ownerMode === 'any') { suppress = true; reason = '본인 무시 시간 중'; }
+
+    if (suppress) { log(`사람 사라짐 · 알림 안 함: ${reason}`); return; }
+
+    const face = e.strangerHits > 0 ? `낯선 얼굴 확인 (${e.strangerHits}회)` : '얼굴 미확인 (뒷모습/멀리)';
+    const caption = `🚶 사람이 나타났다 사라졌습니다\n⏱ ${fmtTime(e.start)} ~ ${fmtTime(e.lastSeen)} (${Math.round(dur)}초)\n👤 최대 ${e.maxPersons}명 · ${face}` +
+                    (ownerPresent ? `\n(등록된 사람도 함께 있었음: ${[...e.ownerNames].join(', ')})` : '');
+    log(`사람 사라짐 · 알림 전송 (${Math.round(dur)}초, ${face})`, true);
+    if (e.bestSnap) tgPhoto(e.bestSnap, caption); else tgText(caption);
+    if (clip && clip.size > 1000) tgVideo(clip, `🎥 ${fmtTime(e.start)} 녹화 영상${dur > S.maxClip ? ` (앞 ${S.maxClip}초)` : ''}`);
+  }
+
+  // ---- 메인 루프 ----
+  let lastDetect = 0, detectBusy = false, frameCount = 0, fpsT = performance.now(), fps = 0;
+  async function loop() {
+    if (!running) return;
+    const now = Date.now();
+    try {
+      const motion = motionScore();
+      const interval = ev || enrolling ? 250 : (motion > 0.01 ? 300 : 2500); // 움직임 없으면 2.5초마다만 확인
+      if (!detectBusy && now - lastDetect >= interval) {
+        detectBusy = true; lastDetect = now;
+        await detect(now);
+        detectBusy = false;
+        frameCount++;
+      }
+      const pn = performance.now();
+      if (pn - fpsT > 3000) { fps = frameCount / ((pn - fpsT) / 1000); frameCount = 0; fpsT = pn; }
+      drawOverlay();
+      setStatus([
+        [armed ? '● 감시' : 'Ⅱ 일시정지', armed ? 'ok' : 'warn'],
+        [ev ? `사람 ${ev.maxPersons}명 · ${Math.round((now - ev.start) / 1000)}초` : '조용함', ev ? 'bad' : ''],
+        [`분석 ${fps.toFixed(1)}/s`],
+        [`움직임 ${(motion * 100).toFixed(0)}%`],
+        ...(live.calls.size ? [[`시청 ${live.calls.size}`, 'ok']] : []),
+      ]);
+    } catch (e) { detectBusy = false; console.error(e); }
+    setTimeout(loop, 120);
+  }
+
+  let lastPersons = [], mpTs = 0;
+  async function detect(now) {
+    mpTs = Math.max(mpTs + 1, performance.now());
+    const pr = personDet.detectForVideo(video, mpTs);
+    const persons = pr.detections
+      .map(d => ({ score: d.categories[0].score, box: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height] }))
+      .filter(p => p.score >= S.personThr);
+    // 얼굴 인식은 사람이 보일 때(또는 등록 중)만 실행해서 배터리를 아낀다
+    let faces = [];
+    if (persons.length || enrolling || ev) {
+      const res = await human.detect(video);
+      faces = (res.face || []).filter(f => (f.boxScore ?? f.score) >= 0.5);
+    }
+    lastPersons = persons;
+    lastFaces = faces.map(f => ({ box: f.box, id: identify(f.embedding), w: f.box[2] }));
+
+    // 얼굴 등록 모드
+    if (enrolling) { handleEnroll(faces); return; }
+
+    // 등록된 사람/낯선 얼굴 판별
+    const known = lastFaces.filter(f => f.id.sim >= S.matchThr);
+    const strangers = lastFaces.filter(f => f.id.sim < S.matchThr && f.w >= 48); // 너무 작은 얼굴은 판단 보류
+    if (known.length) {
+      graceUntil = Math.max(graceUntil, now + S.graceMin * 60_000);
+      setArmBadge();
+    }
+
+    // 사람 등장 판정: 최근 3번 중 2번 이상 감지 (오탐 방지)
+    const present = persons.length > 0 || faces.length > 0;
+    recentPerson.push(present); if (recentPerson.length > 3) recentPerson.shift();
+    if (!ev && recentPerson.filter(Boolean).length >= 2) { await beginEvent(now, persons); ev.startedInGrace = now < graceUntil && !known.length; }
+
+    if (ev) {
+      if (present) {
+        ev.lastSeen = now;
+        ev.maxPersons = Math.max(ev.maxPersons, persons.length, faces.length);
+      }
+      for (const k of known) { ev.ownerHits++; ev.ownerNames.add(k.id.name); }
+      ev.strangerHits += strangers.length;
+      if (present && !faces.length) ev.noFaceFrames++;
+
+      // 대표 사진: 낯선 얼굴 > 큰 사람 순으로 1초마다 갱신
+      const score = strangers.length * 1000 + Math.max(0, ...strangers.map(s => s.w)) + Math.max(0, ...persons.map(p => p.box[2] * p.box[3] / 1e4));
+      if (present && score > ev.bestScore && now - ev.lastSnapAt > 1000) {
+        ev.bestScore = score; ev.lastSnapAt = now;
+        ev.bestSnap = await snapshot(overlayBoxes());
+      }
+      // 낯선 얼굴 즉시 알림 (선택)
+      if (S.instantAlert && armed && !ev.instantSent && ev.strangerHits >= 3 && !(S.ownerMode === 'any' && ev.ownerHits >= 2)) {
+        ev.instantSent = true;
+        tgPhoto(await snapshot(overlayBoxes()), `⚠️ 낯선 얼굴 감지 (진행 중) · ${fmtTime(now)}`);
+      }
+      if (now - ev.lastSeen > S.endSec * 1000) await endEvent(now);
+    }
+  }
+
+  function overlayBoxes() {
+    const out = lastPersons.map(p => ({ box: p.box, color: '#f5a524', label: `사람 ${Math.round(p.score * 100)}%` }));
+    for (const f of lastFaces) {
+      const ok = f.id.sim >= S.matchThr;
+      out.push({ box: f.box, color: ok ? '#2fbf71' : '#ef4f4f', label: ok ? `${f.id.name} ${f.id.sim.toFixed(2)}` : `미등록 ${f.id.sim.toFixed(2)}` });
+    }
+    return out;
+  }
+  function drawOverlay() {
+    octx.clearRect(0, 0, overlay.width, overlay.height);
+    octx.lineWidth = 3; octx.font = '18px sans-serif';
+    for (const b of overlayBoxes()) {
+      octx.strokeStyle = b.color; octx.strokeRect(...b.box);
+      octx.fillStyle = b.color; octx.fillText(b.label, b.box[0] + 4, Math.max(18, b.box[1] - 6));
+    }
+    if (enrolling) {
+      octx.fillStyle = 'rgba(0,0,0,.6)'; octx.fillRect(0, 0, overlay.width, 40);
+      octx.fillStyle = '#fff'; octx.fillText(`얼굴 등록 중: ${enrolling.samples.length}/${enrolling.target} — 정면을 보고 고개를 살짝 돌려주세요`, 10, 26);
+    }
+  }
+
+  // ---- 얼굴 등록 ----
+  function handleEnroll(faces) {
+    const e = enrolling;
+    if (Date.now() > e.deadline) { finishEnroll(); return; }
+    if (faces.length !== 1) return;
+    const f = faces[0];
+    if (f.box[2] < 70 || !f.embedding || !f.embedding.length) return;
+    if (Date.now() - e.last < 350) return;
+    e.last = Date.now();
+    e.samples.push(Array.from(f.embedding));
+    if (e.samples.length >= e.target) finishEnroll();
+  }
+  function finishEnroll() {
+    const e = enrolling; enrolling = null;
+    $('btnEnroll').disabled = false;
+    if (e.samples.length < 3) { alert('얼굴을 충분히 인식하지 못했습니다. 더 밝은 곳에서 카메라에 가까이 다가가 다시 시도하세요.'); return; }
+    let p = people.find(x => x.name === e.name);
+    if (!p) { p = { name: e.name, samples: [] }; people.push(p); }
+    p.samples.push(...e.samples);
+    if (p.samples.length > 40) p.samples = p.samples.slice(-40);
+    store.set('people', people); renderPeople();
+    log(`${e.name} 얼굴 등록 (${e.samples.length}개 샘플)`, true);
+    if (!e.wasRunning) stopAll(true);
+  }
+  $('btnEnroll').onclick = async () => {
+    const name = $('ownerName').value.trim() || '나';
+    $('btnEnroll').disabled = true;
+    try {
+      const wasRunning = running;
+      if (!running) { await startPipeline(false); }
+      enrolling = { name, samples: [], target: 10, last: 0, deadline: Date.now() + 25000, wasRunning };
+    } catch (e) { alert('카메라/모델 시작 실패: ' + e.message); $('btnEnroll').disabled = false; }
+  };
+
+  // ---- 시작/중지 ----
+  let wakeLock = null;
+  async function keepAwake() {
+    try { if ('wakeLock' in navigator && document.visibilityState === 'visible') { wakeLock = await navigator.wakeLock.request('screen'); } } catch (e) { log('화면 켜짐 유지 실패: ' + e.message); }
+  }
+  async function startPipeline(arm) {
+    readSettings();
+    await openCamera();
+    await loadModels();
+    running = true; armed = arm;
+    loop();
+    setArmBadge();
+  }
+  $('btnStart').onclick = async () => {
+    readSettings();
+    if (!tgReady() && !confirm('텔레그램이 설정되지 않아 알림을 보낼 수 없습니다. 그래도 시작할까요?')) return;
+    if (!people.length && !confirm('등록된 얼굴이 없어 본인도 감지 대상이 됩니다. 그래도 시작할까요?')) return;
+    $('btnStart').disabled = true;
+    try {
+      if (!running) await startPipeline(true); else { armed = true; setArmBadge(); }
+      await keepAwake();
+      live.start();
+      pollCommands();
+      $('btnStop').disabled = false;
+      log('감시 시작', true);
+      tgText(`🟢 보안캠 감시 시작 · ${fmtDT(Date.now())}\n명령어는 /help`);
+    } catch (e) { alert('시작 실패: ' + e.message); log('시작 실패: ' + e.message, true); $('btnStart').disabled = false; }
+  };
+  function stopAll(silent) {
+    running = false; armed = false;
+    if (ev && ev.rec) ev.rec.stop(); ev = null; recentPerson = [];
+    live.stop();
+    if (stream) stream.getTracks().forEach(t => t.stop()); stream = null;
+    try { wakeLock && wakeLock.release(); } catch {}
+    octx.clearRect(0, 0, overlay.width, overlay.height); setStatus([]);
+    $('btnStart').disabled = false; $('btnStop').disabled = true; setArmBadge();
+    if (!silent) { log('감시 중지', true); tgText(`🔴 보안캠 감시 중지 · ${fmtDT(Date.now())}`); }
+  }
+  $('btnStop').onclick = () => stopAll(false);
+
+  // ---- 화면 꺼짐 / 배터리 감시 ----
+  document.addEventListener('visibilitychange', () => {
+    if (!running) return;
+    if (document.visibilityState === 'hidden') { tgBeacon('⚠️ 보안캠 화면이 꺼지거나 다른 앱으로 전환되어 감시가 멈출 수 있습니다.'); }
+    else { keepAwake(); if (!stream || stream.getVideoTracks()[0].readyState === 'ended') openCamera().catch(() => {}); tgText('🟢 보안캠 화면이 다시 켜졌습니다.'); }
+  });
+  let batWarned = false;
+  setInterval(async () => {
+    if (!running) return;
+    try {
+      const b = await navigator.getBattery();
+      if (!b.charging && b.level < 0.2 && !batWarned) { batWarned = true; tgText(`🔋 보안캠 배터리 부족: ${Math.round(b.level * 100)}% (충전기를 확인하세요)`); }
+      if (b.charging) batWarned = false;
+    } catch {}
+    // 카메라 끊김 복구
+    if (stream && stream.getVideoTracks()[0].readyState === 'ended') { log('카메라 끊김 → 재연결'); openCamera().catch(e => log('카메라 재연결 실패: ' + e.message)); }
+  }, 60_000);
+
+  setInterval(setArmBadge, 30_000);
+
+  // ---- 화면 어둡게 ----
+  $('btnBlack').onclick = () => { $('blackout').style.display = 'flex'; };
+  $('blackout').onclick = () => { $('blackout').style.display = 'none'; };
+
+  // ---- 텔레그램 설정 도우미 ----
+  $('btnFindChat').onclick = async () => {
+    readSettings();
+    if (!S.tgToken) return alert('봇 토큰을 먼저 입력하세요.');
+    try {
+      const ups = await tgCall('getUpdates', { timeout: 0 });
+      const m = ups.reverse().map(u => u.message || u.channel_post).find(Boolean);
+      if (!m) return alert('메시지를 찾지 못했습니다. 받을 휴대폰의 텔레그램에서 봇에게 /start 를 보낸 뒤 다시 누르세요.');
+      $('tgChat').value = m.chat.id; readSettings();
+      alert(`찾았습니다: ${m.chat.first_name || m.chat.title || ''} (${m.chat.id})`);
+    } catch (e) { alert('실패: ' + e.message); }
+  };
+  $('btnTestTg').onclick = async () => {
+    readSettings();
+    try { await tgCall('sendMessage', { chat_id: S.tgChat, text: '✅ 보안캠 테스트 메시지입니다.' }); alert('보냈습니다. 텔레그램을 확인하세요.'); }
+    catch (e) { alert('실패: ' + e.message); }
+  };
+
+  if (!window.isSecureContext) alert('카메라를 쓰려면 https:// 주소로 열어야 합니다.');
+  log('준비됨. 얼굴 등록과 텔레그램 설정 후 [감시 시작]을 누르세요.');
+}
+
+function rand(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a, b => 'abcdefghijkmnpqrstuvwxyz23456789'[b % 32]).join(''); }
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+</script>
+</body>
+</html>
