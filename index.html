@@ -111,7 +111,9 @@
       <div><label>최소 이벤트 길이 (초)</label><input id="minEvent" type="number" step="0.5" min="0" max="20" value="1.5"></div>
     </div>
     <label><input id="instantAlert" type="checkbox"> 낯선 얼굴이 보이면 사라지기 전에 사진 먼저 보내기</label>
-    <div class="hint">'본인 확인 후 무시 시간': 본인 얼굴이 확인되면 이 시간 동안은 얼굴이 안 보이는 움직임(뒷모습 등)도 본인으로 간주합니다. 외출할 때는 텔레그램에서 /arm 을 보내면 바로 해제됩니다. 녹화는 영상만 하고 소리는 녹음하지 않습니다.</div>
+    <label><input id="audioOn" type="checkbox"> 🎤 소리 녹음 (녹화 영상 · 실시간 보기 · /clip)</label>
+    <div class="hint" style="color:var(--warn)">⚠️ 내가 참여하지 않은 다른 사람들의 대화를 녹음하면 통신비밀보호법 위반이 될 수 있습니다. 가족·손님이 있을 때는 끄세요. 텔레그램에서 /sound on, /sound off 로도 바꿀 수 있습니다.</div>
+    <div class="hint">'본인 확인 후 무시 시간': 본인 얼굴이 확인되면 이 시간 동안은 얼굴이 안 보이는 움직임(뒷모습 등)도 본인으로 간주합니다. 외출할 때는 텔레그램에서 /arm 을 보내면 바로 해제됩니다.</div>
   </div>
 
   <div class="card">
@@ -142,8 +144,9 @@
   <div class="row" style="margin-top:10px">
     <button id="vReconnect">다시 연결</button>
     <button id="vSnap">사진 저장</button>
+    <button id="vSound" class="hidden">🔊 소리 켜기</button>
   </div>
-  <div class="hint" id="vHint">카메라 휴대폰과 P2P(WebRTC)로 연결합니다. 일부 모바일 데이터망에서는 연결이 안 될 수 있습니다. 그럴 땐 텔레그램에서 /snap 이나 /clip 을 사용하세요.</div>
+  <div class="hint" id="vHint">카메라 휴대폰과 P2P(WebRTC)로 연결합니다. 일부 모바일 데이터망에서는 연결이 안 될 수 있습니다. 그럴 땐 텔레그램에서 /watch, /snap, /clip 을 사용하세요.</div>
 </main>
 
 <div id="blackout">감시 중 · 화면을 탭하면 돌아옵니다</div>
@@ -169,7 +172,12 @@ const store = {
 
 // WebRTC 연결 경로: STUN(직접 연결 시도) + 선택적 TURN(중계 서버, 모바일 데이터망용)
 function iceConfig(turn) {
-  const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }];
+  const iceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    // PeerJS 기본 무료 중계(TURN) 서버 — 직접 연결이 막힌 망에서 사용 (PeerJS 기본값과 동일)
+    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+  ];
   if (turn && turn.u) iceServers.push({ urls: turn.u.split(/[\s,]+/).filter(Boolean), username: turn.n || '', credential: turn.p || '' });
   return { iceServers };
 }
@@ -194,8 +202,8 @@ function startViewer(camId, key, turn) {
     hint.innerHTML = `<b>${why}</b><br>` +
       (inApp ? '· 지금 텔레그램/앱 안의 브라우저입니다. 오른쪽 위 ⋮ → <b>Chrome(브라우저)에서 열기</b>로 다시 열어 보세요.<br>' : '') +
       (turn && turn.u ? '· TURN 서버가 설정되어 있는데도 실패했다면 TURN 주소·사용자명·비밀번호를 확인하세요.<br>'
-                      : '· 모바일 데이터망에서는 직접(P2P) 연결이 막히는 경우가 많습니다. 카메라 폰의 <b>실시간 보기 → TURN 서버</b>를 설정한 뒤 /live 로 새 링크를 받으세요.<br>· 같은 와이파이에 연결하면 바로 되는지 확인해 보세요.<br>') +
-      '· 그동안은 텔레그램에서 /snap, /clip 을 사용하세요.';
+                      : '· 두 폰 사이의 직접(P2P) 연결이 막혀 있습니다. 모바일 데이터망이나, 같은 와이파이라도 공유기의 <b>AP 격리(클라이언트 격리)</b>·게스트 와이파이·메시 공유기에서 자주 생깁니다.<br>· 해결: 카메라 폰의 <b>실시간 보기 → TURN 서버</b>를 설정한 뒤 /live 로 새 링크를 받으세요.<br>') +
+      '· 그동안은 텔레그램에서 <b>/watch</b> (3초마다 바뀌는 화면), /snap, /clip 을 사용하세요.';
   };
 
   function connect() {
@@ -221,7 +229,8 @@ function startViewer(camId, key, turn) {
     });
     peer.on('call', (call) => {
       call.answer();
-      call.on('stream', (s) => { gotStream = true; clearTimeout(failTimer); hint.textContent = baseHint; video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok'); });
+      call.on('stream', (s) => { gotStream = true; clearTimeout(failTimer); hint.textContent = baseHint; video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok');
+        $('vSound').classList.toggle('hidden', !s.getAudioTracks().length); $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기'; });
       call.on('close', () => setBadge('끊김', 'warn'));
     });
     peer.on('error', (e) => {
@@ -232,6 +241,10 @@ function startViewer(camId, key, turn) {
     });
   }
   $('vReconnect').onclick = connect;
+  $('vSound').onclick = () => {
+    video.muted = !video.muted; video.play().catch(() => {});
+    $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
+  };
   $('vSnap').onclick = () => {
     if (!video.videoWidth) return;
     const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight;
@@ -249,7 +262,7 @@ async function startCamera() {
   const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
 
   // ---- 설정 ----
-  const FIELDS = ['tgToken','tgChat','camFacing','camRes','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert','turnUrl','turnUser','turnPass'];
+  const FIELDS = ['tgToken','tgChat','camFacing','camRes','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert','audioOn','turnUrl','turnUser','turnPass'];
   const saved = store.get('settings', {});
   for (const f of FIELDS) {
     const el = $(f); if (saved[f] === undefined) continue;
@@ -261,6 +274,15 @@ async function startCamera() {
     store.set('settings', S);
   }
   FIELDS.forEach(f => $(f).addEventListener('change', readSettings));
+  $('audioOn').addEventListener('change', async () => {
+    const on = $('audioOn').checked;
+    if (on && !confirm('소리를 녹음합니다. 다른 사람들의 대화가 녹음되지 않도록 주의하세요. 켤까요?')) { $('audioOn').checked = false; readSettings(); return; }
+    if (stream) { const r = await setAudio(on, '설정'); if (!r.ok) alert('마이크를 켜지 못했습니다: ' + r.err); }
+    else if (on) { // 감시 전이면 마이크 권한만 미리 받아 둔다 (텔레그램 /sound on 이 나중에 작동하도록)
+      try { (await navigator.mediaDevices.getUserMedia({ audio: true })).getTracks().forEach(t => t.stop()); }
+      catch (e) { alert('마이크 권한이 필요합니다: ' + e.message); $('audioOn').checked = false; readSettings(); }
+    }
+  });
   readSettings();
 
   // ---- 등록된 사람 ----
@@ -316,7 +338,32 @@ async function startCamera() {
     await video.play();
     await new Promise(r => video.videoWidth ? r() : video.onloadedmetadata = r);
     overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+    if (S.audioOn) await attachAudio().catch(e => log('마이크 켜기 실패: ' + e.message));
     if (live.peer) live.refreshCalls();
+  }
+
+  // ---- 소리 (마이크) ----
+  const hasAudio = () => !!(stream && stream.getAudioTracks().some(t => t.readyState === 'live'));
+  async function attachAudio() {
+    if (!stream || hasAudio()) return;
+    const a = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true }, video: false });
+    a.getAudioTracks().forEach(t => stream.addTrack(t));
+  }
+  function detachAudio() {
+    if (!stream) return;
+    stream.getAudioTracks().forEach(t => { t.stop(); stream.removeTrack(t); });
+  }
+  // 소리 켜기/끄기 (설정 체크박스와 텔레그램 /sound 공용)
+  async function setAudio(on, from) {
+    let ok = true, err = '';
+    if (stream) {
+      try { if (on) await attachAudio(); else detachAudio(); }
+      catch (e) { ok = false; err = e.message; }
+    }
+    $('audioOn').checked = ok ? on : false; readSettings();
+    if (ok) live.restartCalls();
+    log(ok ? `소리 녹음 ${on ? '켬' : '끔'} (${from})` : `소리 켜기 실패: ${err}`, true);
+    return { ok, err };
   }
 
   // ---- AI 모델 ----
@@ -396,11 +443,15 @@ async function startCamera() {
   }
 
   // ---- 녹화 ----
-  const MIME = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp8', 'video/webm'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+  const pickMime = (audio) => (audio
+      ? ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm']
+      : ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp8', 'video/webm'])
+    .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
   function startRecorder(maxSec) {
     if (!window.MediaRecorder) return null;
     const chunks = [];
-    const rec = new MediaRecorder(stream, MIME ? { mimeType: MIME, videoBitsPerSecond: 900_000 } : undefined);
+    const MIME = pickMime(hasAudio());
+    const rec = new MediaRecorder(stream, MIME ? { mimeType: MIME, videoBitsPerSecond: 900_000, audioBitsPerSecond: 64_000 } : undefined);
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     const done = new Promise(r => rec.onstop = () => r(new Blob(chunks, { type: rec.mimeType || MIME || 'video/webm' })));
     rec.start(1000);
@@ -457,26 +508,57 @@ async function startCamera() {
           pollOffset = u.update_id + 1;
           const m = u.message; if (!m || !m.text) continue;
           if (String(m.chat.id) !== String(S.tgChat)) continue; // 등록된 채팅만 허용
-          handleCommand(m.text.trim().split(/\s+/)[0].split('@')[0].toLowerCase());
+          const parts = m.text.trim().split(/\s+/); handleCommand(parts[0].split('@')[0].toLowerCase(), parts.slice(1));
         }
       } catch (e) { await sleep(5000); }
     }
     polling = false;
   }
-  async function handleCommand(cmd) {
-    if (cmd === '/snap') { tgPhoto(await snapshot(), `📸 현재 화면 · ${fmtDT(Date.now())}`); }
+  // 텔레그램 안에서 보는 준실시간 화면: 사진 한 장을 몇 초마다 새 화면으로 바꿔 줌 (P2P 불필요)
+  let watchSession = null;
+  async function startWatch(sec) {
+    if (watchSession) { watchSession.until = Date.now() + sec * 1000; return tgText(`⏱ 지켜보기를 ${sec}초 연장했습니다.`); }
+    const ses = watchSession = { until: Date.now() + sec * 1000, stop: false };
+    const cap = () => `👀 지켜보기 · ${fmtTime(Date.now())} · 남은 ${Math.max(0, Math.ceil((ses.until - Date.now()) / 1000))}초 (/stop 으로 끝내기)`;
+    try {
+      const msg = await tgCall('sendPhoto', { chat_id: S.tgChat, caption: cap() }, { field: 'photo', blob: await snapshot(), name: 'watch.jpg' });
+      log(`지켜보기 시작 (${sec}초)`);
+      while (running && !ses.stop && Date.now() < ses.until) {
+        await sleep(3000);
+        try {
+          await tgCall('editMessageMedia', { chat_id: S.tgChat, message_id: msg.message_id, media: { type: 'photo', media: 'attach://frame', caption: cap() } },
+                       { field: 'frame', blob: await snapshot(), name: 'watch.jpg' });
+        } catch (e) { const m = /retry after (\d+)/i.exec(e.message); if (m) await sleep(Number(m[1]) * 1000); }
+      }
+      await tgCall('editMessageCaption', { chat_id: S.tgChat, message_id: msg.message_id, caption: `👀 지켜보기 끝 · ${fmtTime(Date.now())}` }).catch(() => {});
+    } catch (e) { log('지켜보기 실패: ' + e.message); }
+    finally { watchSession = null; }
+  }
+
+  async function handleCommand(cmd, args = []) {
+    if (cmd === '/watch') { const sec = Math.min(600, Math.max(10, parseInt(args[0]) || 60)); startWatch(sec); }
+    else if (cmd === '/stop') { if (watchSession) { watchSession.stop = true; } else tgText('진행 중인 지켜보기가 없습니다.'); }
+    else if (cmd === '/snap') { tgPhoto(await snapshot(), `📸 현재 화면 · ${fmtDT(Date.now())}`); }
     else if (cmd === '/clip') { tgText('🎥 10초 녹화 중…'); const r = startRecorder(10); if (r) tgVideo(await r.done, `🎥 요청 영상 · ${fmtDT(Date.now())}`); }
     else if (cmd === '/live') { live.ensureIds(); tgText(live.peer ? `📡 실시간 보기:\n${live.url}` : '실시간 보기 연결이 아직 준비되지 않았습니다.'); }
     else if (cmd === '/arm') { armed = true; graceUntil = 0; setArmBadge(); log('텔레그램: 감시 재개 (/arm)', true); tgText('🟢 감시를 재개했습니다. 본인 무시 시간도 해제했습니다.'); }
     else if (cmd === '/disarm') { armed = false; setArmBadge(); log('텔레그램: 일시정지 (/disarm)', true); tgText('⏸️ 알림을 일시정지했습니다. /arm 으로 재개합니다.'); }
     else if (cmd === '/status') { tgText(await statusText()); }
-    else tgText('명령어:\n/status 상태\n/snap 지금 사진\n/clip 10초 영상\n/live 실시간 보기 링크\n/arm 감시 재개(본인 무시 해제)\n/disarm 알림 일시정지');
+    else if (cmd === '/sound') {
+      const a = (args[0] || '').toLowerCase();
+      if (!['on', 'off', '켜기', '끄기'].includes(a)) return tgText(`🎤 소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n/sound on 또는 /sound off 로 바꿀 수 있습니다.`);
+      const on = a === 'on' || a === '켜기';
+      const r = await setAudio(on, '텔레그램');
+      tgText(r.ok ? (on ? '🎤 소리 녹음을 켰습니다. 다음 녹화·/clip·실시간 보기부터 소리가 함께 들어갑니다.\n⚠️ 다른 사람들의 대화가 녹음되지 않도록 주의하세요.' : '🔇 소리 녹음을 껐습니다.')
+                  : `⚠️ 마이크를 켜지 못했습니다 (${r.err}).\n카메라 폰에서 설정의 '소리 녹음'을 한 번 직접 켜서 마이크 권한을 허용해 주세요.`);
+    }
+    else tgText('명령어:\n/status 상태\n/snap 지금 사진\n/clip 10초 영상\n/watch [초] 텔레그램에서 3초마다 바뀌는 화면 (기본 60초)\n/stop 지켜보기 끝내기\n/live 실시간 보기 링크\n/sound on|off 소리 녹음 켜기/끄기\n/arm 감시 재개(본인 무시 해제)\n/disarm 알림 일시정지');
   }
   async function statusText() {
     let bat = '';
     try { const b = await navigator.getBattery(); bat = `\n배터리: ${Math.round(b.level * 100)}% ${b.charging ? '(충전 중)' : '(충전 안 함!)'}`; } catch {}
     const g = Date.now() < graceUntil ? `\n본인 무시 중: ${fmtTime(graceUntil)}까지` : '';
-    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
+    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
   }
 
   // ---- 실시간 보기 (PeerJS / WebRTC) ----
@@ -500,7 +582,7 @@ async function startCamera() {
           if (d.k !== this.key) { conn.send({ type: 'denied' }); setTimeout(() => conn.close(), 500); log('실시간 보기: 잘못된 키로 접속 시도'); return; }
           if (this.calls.size >= this.MAX) { conn.send({ type: 'busy' }); return; }
           const call = peer.call(conn.peer, stream);
-          call.viewer = conn.peer; this.calls.add(call); log('실시간 보기 접속');
+          call.viewer = conn.peer; call.conn = conn; this.calls.add(call); log('실시간 보기 접속');
           const end = () => { this.calls.delete(call); };
           call.on('close', end); call.on('error', end); conn.on('close', () => { try { call.close(); } catch {} end(); });
         });
@@ -510,6 +592,10 @@ async function startCamera() {
         if (e.type === 'unavailable-id') { $('liveInfo').textContent = '이전 연결 정리 중… 잠시 후 재시도'; setTimeout(() => running && this.start(), 15000); }
         else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) setTimeout(() => running && this.start(), 15000);
       });
+    },
+    restartCalls() { // 소리 트랙이 바뀌면 시청자가 자동으로 다시 접속하도록 연결을 닫는다
+      for (const c of [...this.calls]) { try { c.conn && c.conn.close(); c.close(); } catch {} }
+      this.calls.clear();
     },
     refreshCalls() { // 카메라를 다시 열었을 때 기존 시청자에게 새 영상 전달
       for (const c of this.calls) { try { const s = c.peerConnection.getSenders().find(x => x.track && x.track.kind === 'video'); s && s.replaceTrack(stream.getVideoTracks()[0]); } catch {} }
