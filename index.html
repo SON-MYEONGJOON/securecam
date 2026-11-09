@@ -118,6 +118,15 @@
     <h2>📡 실시간 보기</h2>
     <div class="hint" id="liveInfo">감시를 시작하면 실시간 보기 링크가 만들어집니다. 텔레그램에서 /live 를 보내도 링크를 받을 수 있습니다.</div>
     <div class="row" style="margin-top:8px"><button id="btnCopyLive" disabled>링크 복사</button><button id="btnResetLive">링크 새로 만들기</button></div>
+    <details style="margin-top:10px"><summary>TURN 서버 (모바일 데이터에서 연결이 안 될 때)</summary>
+      <label>TURN 주소 (여러 개는 쉼표로)</label>
+      <input id="turnUrl" placeholder="turn:global.relay.metered.ca:80, turns:global.relay.metered.ca:443?transport=tcp" autocomplete="off">
+      <div class="row">
+        <div><label>사용자명</label><input id="turnUser" autocomplete="off"></div>
+        <div><label>비밀번호</label><input id="turnPass" type="password" autocomplete="off"></div>
+      </div>
+      <div class="hint">metered.ca 무료 계정(월 500MB)에서 발급받을 수 있습니다. 바꾼 뒤에는 텔레그램에서 /live 로 <b>새 링크</b>를 받아야 적용됩니다.</div>
+    </details>
   </div>
 
   <div class="card">
@@ -158,37 +167,67 @@ const store = {
   set(k, v) { try { localStorage.setItem('scam.' + k, JSON.stringify(v)); } catch (e) { console.warn('저장 실패', e); } },
 };
 
+// WebRTC 연결 경로: STUN(직접 연결 시도) + 선택적 TURN(중계 서버, 모바일 데이터망용)
+function iceConfig(turn) {
+  const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun.cloudflare.com:3478' }];
+  if (turn && turn.u) iceServers.push({ urls: turn.u.split(/[\s,]+/).filter(Boolean), username: turn.n || '', credential: turn.p || '' });
+  return { iceServers };
+}
+const b64e = (o) => btoa(unescape(encodeURIComponent(JSON.stringify(o)))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const b64d = (t) => { try { return JSON.parse(decodeURIComponent(escape(atob(t.replace(/-/g, '+').replace(/_/g, '/'))))); } catch { return null; } };
+
 const hashParams = new URLSearchParams(location.hash.slice(1));
-if (hashParams.has('view')) startViewer(hashParams.get('view'), hashParams.get('k'));
+if (hashParams.has('view')) startViewer(hashParams.get('view'), hashParams.get('k'), b64d(hashParams.get('t') || ''));
 else startCamera();
 
 // =====================================================================
 //  뷰어 모드 (다른 휴대폰)
 // =====================================================================
-function startViewer(camId, key) {
+function startViewer(camId, key, turn) {
   $('viewer').classList.remove('hidden');
-  const video = $('vVideo'), badge = $('vBadge');
-  let peer, timer;
+  const video = $('vVideo'), badge = $('vBadge'), hint = $('vHint');
+  const baseHint = hint.textContent;
+  let peer, timer, failTimer, gotStream = false;
   const setBadge = (t, cls) => { badge.textContent = t; badge.className = 'badge ' + (cls || ''); };
+  const inApp = /Telegram|KAKAOTALK|; wv\)/i.test(navigator.userAgent);
+  const failHint = (why) => {
+    hint.innerHTML = `<b>${why}</b><br>` +
+      (inApp ? '· 지금 텔레그램/앱 안의 브라우저입니다. 오른쪽 위 ⋮ → <b>Chrome(브라우저)에서 열기</b>로 다시 열어 보세요.<br>' : '') +
+      (turn && turn.u ? '· TURN 서버가 설정되어 있는데도 실패했다면 TURN 주소·사용자명·비밀번호를 확인하세요.<br>'
+                      : '· 모바일 데이터망에서는 직접(P2P) 연결이 막히는 경우가 많습니다. 카메라 폰의 <b>실시간 보기 → TURN 서버</b>를 설정한 뒤 /live 로 새 링크를 받으세요.<br>· 같은 와이파이에 연결하면 바로 되는지 확인해 보세요.<br>') +
+      '· 그동안은 텔레그램에서 /snap, /clip 을 사용하세요.';
+  };
 
   function connect() {
-    clearTimeout(timer);
+    clearTimeout(timer); clearTimeout(failTimer);
     if (peer) try { peer.destroy(); } catch {}
-    setBadge('연결 중');
-    peer = new Peer();
+    gotStream = false; hint.textContent = baseHint;
+    setBadge('1/3 서버 연결 중');
+    peer = new Peer({ config: iceConfig(turn) });
+    failTimer = setTimeout(() => { if (!gotStream) { setBadge('연결 실패', 'bad'); failHint(`'${badge.dataset.stage || '연결'}' 단계에서 25초 동안 진행되지 않았습니다.`); } }, 25000);
     peer.on('open', () => {
+      setBadge('2/3 카메라 찾는 중'); badge.dataset.stage = '카메라 찾기';
       const conn = peer.connect(camId, { reliable: true });
-      conn.on('open', () => conn.send({ type: 'hello', k: key }));
-      conn.on('data', (d) => { if (d && d.type === 'denied') setBadge('인증 실패', 'bad'); if (d && d.type === 'busy') setBadge('접속자 초과', 'warn'); });
+      conn.on('open', () => { setBadge('3/3 영상 받는 중'); badge.dataset.stage = '영상 받기'; conn.send({ type: 'hello', k: key }); });
+      conn.on('data', (d) => {
+        if (d && d.type === 'denied') { clearTimeout(failTimer); setBadge('인증 실패', 'bad'); hint.textContent = '링크가 만료되었습니다. 텔레그램에서 /live 로 새 링크를 받으세요.'; }
+        if (d && d.type === 'busy') { clearTimeout(failTimer); setBadge('접속자 초과', 'warn'); }
+      });
       conn.on('close', () => { setBadge('끊김', 'warn'); timer = setTimeout(connect, 5000); });
+      // 데이터 연결의 P2P 경로가 실패하는지 감시
+      const watchIce = () => { const pc = conn.peerConnection; if (!pc) return setTimeout(watchIce, 300);
+        pc.addEventListener('iceconnectionstatechange', () => { if (pc.iceConnectionState === 'failed' && !gotStream) { clearTimeout(failTimer); setBadge('연결 실패', 'bad'); failHint('두 휴대폰 사이에 직접 연결 경로를 찾지 못했습니다.'); } }); };
+      watchIce();
     });
     peer.on('call', (call) => {
       call.answer();
-      call.on('stream', (s) => { video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok'); });
+      call.on('stream', (s) => { gotStream = true; clearTimeout(failTimer); hint.textContent = baseHint; video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok'); });
       call.on('close', () => setBadge('끊김', 'warn'));
     });
     peer.on('error', (e) => {
-      setBadge(e.type === 'peer-unavailable' ? '카메라 꺼짐' : '오류', 'bad');
+      clearTimeout(failTimer);
+      if (e.type === 'peer-unavailable') { setBadge('카메라 꺼짐', 'bad'); hint.textContent = '카메라 폰에서 감시가 꺼져 있거나 화면이 꺼져 있습니다. 8초 뒤 다시 시도합니다.'; }
+      else { setBadge('오류', 'bad'); hint.textContent = '오류: ' + e.type + ' — 8초 뒤 다시 시도합니다.'; }
       timer = setTimeout(connect, 8000);
     });
   }
@@ -210,7 +249,7 @@ async function startCamera() {
   const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
 
   // ---- 설정 ----
-  const FIELDS = ['tgToken','tgChat','camFacing','camRes','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert'];
+  const FIELDS = ['tgToken','tgChat','camFacing','camRes','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert','turnUrl','turnUser','turnPass'];
   const saved = store.get('settings', {});
   for (const f of FIELDS) {
     const el = $(f); if (saved[f] === undefined) continue;
@@ -409,7 +448,7 @@ async function startCamera() {
   // 텔레그램 명령 수신 (/status /snap /clip /live /arm /disarm)
   let pollOffset = 0, polling = false;
   async function pollCommands() {
-    if (polling) return; polling = true;
+    if (polling || !tgReady()) return; polling = true;
     try { const u = await tgCall('getUpdates', { offset: -1, timeout: 0 }); if (u.length) pollOffset = u[u.length - 1].update_id + 1; } catch {}
     while (running && tgReady()) {
       try {
@@ -427,7 +466,7 @@ async function startCamera() {
   async function handleCommand(cmd) {
     if (cmd === '/snap') { tgPhoto(await snapshot(), `📸 현재 화면 · ${fmtDT(Date.now())}`); }
     else if (cmd === '/clip') { tgText('🎥 10초 녹화 중…'); const r = startRecorder(10); if (r) tgVideo(await r.done, `🎥 요청 영상 · ${fmtDT(Date.now())}`); }
-    else if (cmd === '/live') { tgText(live.url ? `📡 실시간 보기:\n${live.url}` : '실시간 보기 연결이 아직 준비되지 않았습니다.'); }
+    else if (cmd === '/live') { live.ensureIds(); tgText(live.peer ? `📡 실시간 보기:\n${live.url}` : '실시간 보기 연결이 아직 준비되지 않았습니다.'); }
     else if (cmd === '/arm') { armed = true; graceUntil = 0; setArmBadge(); log('텔레그램: 감시 재개 (/arm)', true); tgText('🟢 감시를 재개했습니다. 본인 무시 시간도 해제했습니다.'); }
     else if (cmd === '/disarm') { armed = false; setArmBadge(); log('텔레그램: 일시정지 (/disarm)', true); tgText('⏸️ 알림을 일시정지했습니다. /arm 으로 재개합니다.'); }
     else if (cmd === '/status') { tgText(await statusText()); }
@@ -447,12 +486,13 @@ async function startCamera() {
     ensureIds() {
       if (!this.id) { this.id = 'scam-' + rand(20); store.set('liveId', this.id); }
       if (!this.key) { this.key = rand(16); store.set('liveKey', this.key); }
-      this.url = `${location.origin}${location.pathname}#view=${this.id}&k=${this.key}`;
+      const turn = S.turnUrl ? { u: S.turnUrl, n: S.turnUser, p: S.turnPass } : null;
+      this.url = `${location.origin}${location.pathname}#view=${this.id}&k=${this.key}` + (turn ? `&t=${b64e(turn)}` : '');
     },
     start() {
       if (typeof Peer === 'undefined') { $('liveInfo').textContent = '실시간 보기 라이브러리를 불러오지 못했습니다.'; return; }
       this.ensureIds(); this.stop();
-      const peer = this.peer = new Peer(this.id);
+      const peer = this.peer = new Peer(this.id, { config: iceConfig(S.turnUrl ? { u: S.turnUrl, n: S.turnUser, p: S.turnPass } : null) });
       peer.on('open', () => { $('liveInfo').textContent = '실시간 보기 준비됨. 링크를 받을 휴대폰으로 보내세요 (텔레그램 /live).'; $('btnCopyLive').disabled = false; });
       peer.on('connection', (conn) => {
         conn.on('data', (d) => {
@@ -720,14 +760,28 @@ async function startCamera() {
 
   // ---- 텔레그램 설정 도우미 ----
   $('btnFindChat').onclick = async () => {
+    $('tgToken').value = $('tgToken').value.replace(/\s+/g, '');  // 복사할 때 섞인 공백·줄바꿈 제거
     readSettings();
     if (!S.tgToken) return alert('봇 토큰을 먼저 입력하세요.');
+    if (running) return alert('감시 중에는 찾기를 할 수 없습니다. [감시 중지]를 누른 뒤 다시 시도하세요.');
+    let bot;
+    try { bot = await tgCall('getMe'); }
+    catch (e) { return alert(`토큰이 올바르지 않습니다 (${e.message}).
+BotFather가 준 토큰 전체(숫자:문자)를 공백 없이 붙여넣었는지 확인하세요.`); }
     try {
+      try { await tgCall('deleteWebhook'); } catch {}
       const ups = await tgCall('getUpdates', { timeout: 0 });
-      const m = ups.reverse().map(u => u.message || u.channel_post).find(Boolean);
-      if (!m) return alert('메시지를 찾지 못했습니다. 받을 휴대폰의 텔레그램에서 봇에게 /start 를 보낸 뒤 다시 누르세요.');
+      const m = ups.reverse().map(u => u.message || u.edited_message || u.channel_post).find(Boolean);
+      if (!m) return alert(`토큰은 정상입니다 (봇: @${bot.username}).
+하지만 이 봇이 받은 새 메시지가 없습니다.
+
+텔레그램에서 @${bot.username} 대화방에 아무 글자나 하나 보낸 뒤, 바로 [찾기]를 다시 누르세요.`);
       $('tgChat').value = m.chat.id; readSettings();
-      alert(`찾았습니다: ${m.chat.first_name || m.chat.title || ''} (${m.chat.id})`);
+      alert(`찾았습니다!
+봇: @${bot.username}
+받는 사람: ${m.chat.first_name || m.chat.title || ''} (Chat ID ${m.chat.id})
+
+이제 [테스트]를 눌러 보세요.`);
     } catch (e) { alert('실패: ' + e.message); }
   };
   $('btnTestTg').onclick = async () => {
