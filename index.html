@@ -650,10 +650,10 @@ async function startCamera() {
           const who = d.v ? `기기 ${d.v.slice(0, 4)}` : '이전 버전 화면';
           if (d.v) for (const c of [...this.calls]) if (c.vid === d.v) { try { c.conn.send({ type: 'replaced' }); } catch {} this.endCall(c, '같은 기기에서 다시 열림'); }
           this.prune();
-          if (this.calls.size >= this.MAX) { conn.send({ type: 'busy', max: this.MAX }); setTimeout(() => conn.close(), 1000); log(`실시간 보기: ${who} 접속자 초과로 거절 (${this.calls.size}/${this.MAX})`); return; }
+          if (this.calls.size >= this.MAX) { conn.send({ type: 'busy', max: this.MAX }); setTimeout(() => conn.close(), 1000); log(`실시간 보기: ${who} 접속자 초과로 거절 · 현재 시청 ${this.calls.size}/${this.MAX}명`); return; }
           call = peer.call(conn.peer, stream);
           Object.assign(call, { vid: d.v || null, who, conn, hb: !!d.hb, started: Date.now(), lastPing: Date.now(), badSince: 0, ok: false });
-          this.calls.add(call); log(`실시간 보기 접속: ${who} (${this.calls.size}/${this.MAX})`);
+          this.calls.add(call); log(`실시간 보기 접속: ${who} · 현재 시청 ${this.calls.size}/${this.MAX}명`);
           call.on('close', () => this.endCall(call)); call.on('error', () => this.endCall(call, '오류'));
           conn.on('close', () => this.endCall(call));
         });
@@ -675,7 +675,7 @@ async function startCamera() {
       if (!this.calls.delete(c)) return;
       const conn = c.conn; // 'replaced' 알림이 먼저 도착하도록 같은 기기 재접속이면 조금 늦게 닫는다
       setTimeout(() => { try { c.close(); } catch {} try { conn && conn.close(); } catch {} }, why === '같은 기기에서 다시 열림' ? 800 : 0);
-      log(`실시간 보기 종료: ${c.who || '시청자'}${why ? ` (${why})` : ''} · 남은 시청 ${this.calls.size}명`);
+      log(`실시간 보기 종료: ${c.who || '시청자'}${why ? ` (${why})` : ''} · 현재 시청 ${this.calls.size}/${this.MAX}명`);
     },
     // 끊겼는데 종료 신호가 안 온 접속(브라우저를 그냥 닫음, 화면 꺼짐, 연결 실패 등)을 정리해 자리를 비운다
     prune() {
