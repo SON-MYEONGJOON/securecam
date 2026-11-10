@@ -196,7 +196,8 @@ function startViewer(camId, key, turn) {
   const video = $('vVideo'), badge = $('vBadge'), hint = $('vHint');
   const baseHint = hint.textContent;
   let peer, timer, failTimer, pingTimer, connGen = 0, gotStream = false;
-  const vid = rand(10); // 이 시청 화면의 고유 번호 (재접속 시 카메라가 예전 연결을 정리하는 데 사용)
+  // 이 폰(브라우저)의 시청 번호. 저장해 두고 계속 같은 번호를 써서, 링크를 다시 열면 카메라가 예전 접속을 바로 정리한다
+  const vid = (() => { try { let v = localStorage.getItem('scam.vid'); if (!v) { v = rand(10); localStorage.setItem('scam.vid', v); } return v; } catch { return rand(10); } })();
   window.addEventListener('pagehide', () => { try { peer && peer.destroy(); } catch {} });
   const setBadge = (t, cls) => { badge.textContent = t; badge.className = 'badge ' + (cls || ''); };
   const inApp = /Telegram|KAKAOTALK|; wv\)/i.test(navigator.userAgent);
@@ -225,6 +226,10 @@ function startViewer(camId, key, turn) {
         clearInterval(pingTimer); pingTimer = setInterval(() => { try { conn.open && conn.send({ type: 'ping' }); } catch {} }, 5000);
       });
       conn.on('data', (d) => {
+        if (d && d.type === 'replaced') { // 같은 폰의 다른 화면이 접속해서 이 화면은 밀려남 → 서로 밀어내지 않게 자동 재접속 안 함
+          busy = true; clearTimeout(failTimer); clearTimeout(timer); setBadge('다른 화면에서 보는 중', 'warn');
+          hint.textContent = '이 폰의 다른 화면(탭)에서 실시간 보기를 열어서 이 화면은 멈췄습니다. 여기서 보려면 [다시 연결]을 누르세요.';
+        }
         if (d && d.type === 'denied') { busy = true; clearTimeout(failTimer); setBadge('인증 실패', 'bad'); hint.textContent = '링크가 만료되었습니다. 텔레그램에서 /live 로 새 링크를 받으세요.'; }
         if (d && d.type === 'busy') {
           busy = true; clearTimeout(failTimer); setBadge('접속자 초과', 'warn');
@@ -242,7 +247,7 @@ function startViewer(camId, key, turn) {
       call.answer();
       call.on('stream', (s) => { gotStream = true; clearTimeout(failTimer); hint.textContent = baseHint; video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok');
         $('vSound').classList.toggle('hidden', !s.getAudioTracks().length); $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기'; });
-      call.on('close', () => setBadge('끊김', 'warn'));
+      call.on('close', () => { if (gen !== connGen || busy) return; setBadge('끊김', 'warn'); });
     });
     peer.on('error', (e) => {
       if (gen !== connGen) return;
@@ -642,12 +647,13 @@ async function startCamera() {
           if (d.type !== 'hello' || call) return;
           if (d.k !== this.key) { conn.send({ type: 'denied' }); setTimeout(() => conn.close(), 500); log('실시간 보기: 잘못된 키로 접속 시도'); return; }
           // 같은 시청 화면이 다시 접속하면 예전 연결은 정리
-          if (d.v) for (const c of [...this.calls]) if (c.vid === d.v) this.endCall(c, '같은 기기 재접속');
+          const who = d.v ? `기기 ${d.v.slice(0, 4)}` : '이전 버전 화면';
+          if (d.v) for (const c of [...this.calls]) if (c.vid === d.v) { try { c.conn.send({ type: 'replaced' }); } catch {} this.endCall(c, '같은 기기에서 다시 열림'); }
           this.prune();
-          if (this.calls.size >= this.MAX) { conn.send({ type: 'busy', max: this.MAX }); setTimeout(() => conn.close(), 1000); log(`실시간 보기: 접속자 초과 (${this.calls.size}/${this.MAX})`); return; }
+          if (this.calls.size >= this.MAX) { conn.send({ type: 'busy', max: this.MAX }); setTimeout(() => conn.close(), 1000); log(`실시간 보기: ${who} 접속자 초과로 거절 (${this.calls.size}/${this.MAX})`); return; }
           call = peer.call(conn.peer, stream);
-          Object.assign(call, { vid: d.v || null, conn, hb: !!d.hb, started: Date.now(), lastPing: Date.now(), badSince: 0, ok: false });
-          this.calls.add(call); log(`실시간 보기 접속 (${this.calls.size}/${this.MAX})`);
+          Object.assign(call, { vid: d.v || null, who, conn, hb: !!d.hb, started: Date.now(), lastPing: Date.now(), badSince: 0, ok: false });
+          this.calls.add(call); log(`실시간 보기 접속: ${who} (${this.calls.size}/${this.MAX})`);
           call.on('close', () => this.endCall(call)); call.on('error', () => this.endCall(call, '오류'));
           conn.on('close', () => this.endCall(call));
         });
@@ -667,8 +673,9 @@ async function startCamera() {
     },
     endCall(c, why) {
       if (!this.calls.delete(c)) return;
-      try { c.conn && c.conn.close(); } catch {} try { c.close(); } catch {}
-      log(`실시간 보기 종료${why ? ` (${why})` : ''} · 남은 시청 ${this.calls.size}명`);
+      const conn = c.conn; // 'replaced' 알림이 먼저 도착하도록 같은 기기 재접속이면 조금 늦게 닫는다
+      setTimeout(() => { try { c.close(); } catch {} try { conn && conn.close(); } catch {} }, why === '같은 기기에서 다시 열림' ? 800 : 0);
+      log(`실시간 보기 종료: ${c.who || '시청자'}${why ? ` (${why})` : ''} · 남은 시청 ${this.calls.size}명`);
     },
     // 끊겼는데 종료 신호가 안 온 접속(브라우저를 그냥 닫음, 화면 꺼짐, 연결 실패 등)을 정리해 자리를 비운다
     prune() {
