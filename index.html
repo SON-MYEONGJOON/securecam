@@ -617,9 +617,57 @@ async function startCamera() {
     chunks.push(cur);
     chunks.forEach(c => tgText(c));
   }
+  // ---- 배터리·온도 ----
+  // 안드로이드 앱 안에서는 앱이 주는 정보(온도, 꽂혀 있는데 충전 안 됨)를 쓰고, Chrome에서는 브라우저 배터리 API만 쓴다
+  const HOT_C = 42, COOL_C = 38;
+  async function batteryInfo() {
+    try {
+      if (window.SecureCamNative) {
+        const n = JSON.parse(SecureCamNative.battery());
+        if (n.level != null) return { level: n.level, temp: n.temp ?? null, plugged: n.plugged > 0, status: n.status, overheat: !!n.overheat,
+                                      charging: n.status === 'charging' || n.status === 'full', full: n.status === 'full', native: true };
+      }
+    } catch {}
+    try { const b = await navigator.getBattery(); return { level: Math.round(b.level * 100), temp: null, plugged: b.charging, charging: b.charging, full: false, native: false }; }
+    catch { return null; }
+  }
+  function batteryText(b) {
+    const st = b.charging ? (b.full ? '완충' : '충전 중') : !b.native ? '충전 안 함!' : b.plugged ? '꽂혀 있는데 충전 안 됨!' : '충전기 빠짐!';
+    return `${b.level}% (${st})${b.temp != null ? ` · 온도 ${b.temp.toFixed(1)}°C${b.temp >= HOT_C || b.overheat ? ' 🔥' : ''}` : ''}`;
+  }
+  const pw = { hot: false, stopSince: 0, stopLevel: 0, stopWarned: false, lowWarned: false };
+  async function checkPower() {
+    const b = await batteryInfo(); if (!b) return;
+    const now = Date.now();
+    // 발열: 42°C 이상이면 한 번 알리고, 38°C 아래로 내려가면 다시 알릴 준비
+    if (b.temp != null || b.overheat) {
+      if (!pw.hot && (b.temp >= HOT_C || b.overheat)) {
+        pw.hot = true; log(`폰 과열: ${batteryText(b)}`, true);
+        tgText(`🌡️ 보안캠 폰이 뜨겁습니다: ${batteryText(b)}\n뜨거우면 폰이 충전을 스스로 멈춥니다. 케이스를 벗기고 바람이 통하는 곳에 두세요.`);
+      } else if (pw.hot && b.temp != null && b.temp < COOL_C && !b.overheat) {
+        pw.hot = false; log(`폰 온도 내려감: ${batteryText(b)}`);
+        tgText(`🌡️ 보안캠 폰 온도가 내려갔습니다: ${batteryText(b)}`);
+      }
+    }
+    // 충전 멈춤: 2분 넘게 충전이 안 되고, 배터리가 줄고 있거나 75% 아래일 때 (완충·충전 상한 85% 설정에서의 오알림 방지)
+    if (!b.charging) {
+      if (!pw.stopSince) { pw.stopSince = now; pw.stopLevel = b.level; }
+      if (!pw.stopWarned && now - pw.stopSince > 120_000 && (b.level <= pw.stopLevel - 3 || b.level < 75)) {
+        pw.stopWarned = true;
+        const why = !b.native ? '충전이 되지 않고 있습니다' : b.plugged ? `충전기는 꽂혀 있는데 충전이 멈췄습니다${pw.hot || b.overheat ? ' (폰이 뜨거워서일 가능성이 큼)' : ''}` : '충전기가 빠져 있습니다';
+        log(`충전 멈춤: ${batteryText(b)}`, true);
+        tgText(`🔌 보안캠 ${why}: ${batteryText(b)}\n이대로면 배터리가 닳아 폰이 꺼집니다.`);
+      }
+    } else {
+      if (pw.stopWarned) { log(`충전 다시 됨: ${batteryText(b)}`); tgText(`🔌 보안캠 충전이 다시 됩니다: ${batteryText(b)}`); }
+      pw.stopSince = 0; pw.stopWarned = false; pw.lowWarned = false;
+    }
+    if (!b.charging && b.level < 20 && !pw.lowWarned) { pw.lowWarned = true; tgText(`🔋 보안캠 배터리 부족: ${batteryText(b)} (충전기를 확인하세요)`); }
+  }
+
   async function statusText() {
     let bat = '';
-    try { const b = await navigator.getBattery(); bat = `\n배터리: ${Math.round(b.level * 100)}% ${b.charging ? '(충전 중)' : '(충전 안 함!)'}`; } catch {}
+    try { const b = await batteryInfo(); if (b) bat = `\n배터리: ${batteryText(b)}`; } catch {}
     const g = Date.now() < graceUntil ? `\n본인 무시 중: ${fmtTime(graceUntil)}까지` : '';
     return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n실시간 시청: ${live.calls.size}/${live.MAX}명\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
   }
@@ -922,14 +970,9 @@ async function startCamera() {
     if (document.visibilityState === 'hidden') { tgBeacon('⚠️ 보안캠 화면이 꺼지거나 다른 앱으로 전환되어 감시가 멈출 수 있습니다.'); }
     else { keepAwake(); if (!stream || stream.getVideoTracks()[0].readyState === 'ended') openCamera().catch(() => {}); tgText('🟢 보안캠 화면이 다시 켜졌습니다.'); }
   });
-  let batWarned = false;
+  setInterval(() => { if (running) checkPower().catch(() => {}); }, 30_000);
   setInterval(async () => {
     if (!running) return;
-    try {
-      const b = await navigator.getBattery();
-      if (!b.charging && b.level < 0.2 && !batWarned) { batWarned = true; tgText(`🔋 보안캠 배터리 부족: ${Math.round(b.level * 100)}% (충전기를 확인하세요)`); }
-      if (b.charging) batWarned = false;
-    } catch {}
     // 카메라 끊김 복구
     if (stream && stream.getVideoTracks()[0].readyState === 'ended') { log('카메라 끊김 → 재연결'); openCamera().catch(e => log('카메라 재연결 실패: ' + e.message)); }
   }, 60_000);
