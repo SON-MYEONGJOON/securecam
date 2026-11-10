@@ -462,12 +462,17 @@ async function startCamera() {
   // ---- 텔레그램 ----
   const tgReady = () => S.tgToken && S.tgChat;
   async function tgCall(method, params = {}, file) {
-    const fd = new FormData();
-    for (const [k, v] of Object.entries(params)) fd.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
-    if (file) fd.append(file.field, file.blob, file.name);
-    const res = await fetch(`https://api.telegram.org/bot${S.tgToken}/${method}`, { method: 'POST', body: fd });
-    const j = await res.json();
-    if (!j.ok) throw new Error(j.description || 'Telegram 오류');
+    // 파일이 없으면 urlencoded 로 보낸다. (빈 FormData 를 보내면 텔레그램이 내용 없는 400 을 돌려준다)
+    const body = file ? new FormData() : new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) body.append(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+    if (file) body.append(file.field, file.blob, file.name);
+    let res;
+    try { res = await fetch(`https://api.telegram.org/bot${S.tgToken}/${method}`, { method: 'POST', body }); }
+    catch (e) { const err = new Error('텔레그램 서버에 연결할 수 없습니다 (인터넷 연결 확인)'); err.network = true; throw err; }
+    let j = null;
+    try { j = await res.json(); } catch {}
+    if (!j) throw new Error(`텔레그램 응답 오류 (HTTP ${res.status})`);
+    if (!j.ok) { const err = new Error(j.description || 'Telegram 오류'); err.code = j.error_code; throw err; }
     return j.result;
   }
   let tgQueue = Promise.resolve();
@@ -852,8 +857,10 @@ async function startCamera() {
     if (running) return alert('감시 중에는 찾기를 할 수 없습니다. [감시 중지]를 누른 뒤 다시 시도하세요.');
     let bot;
     try { bot = await tgCall('getMe'); }
-    catch (e) { return alert(`토큰이 올바르지 않습니다 (${e.message}).
-BotFather가 준 토큰 전체(숫자:문자)를 공백 없이 붙여넣었는지 확인하세요.`); }
+    catch (e) {
+      if (e.code === 401 || e.code === 404) return alert(`토큰이 올바르지 않습니다 (${e.message}).\nBotFather가 준 토큰 전체(숫자:문자)를 공백 없이 붙여넣었는지 확인하세요.`);
+      return alert(`토큰을 확인하지 못했습니다: ${e.message}\n잠시 뒤 다시 시도하세요.`);
+    }
     try {
       try { await tgCall('deleteWebhook'); } catch {}
       const ups = await tgCall('getUpdates', { timeout: 0 });
