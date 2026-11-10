@@ -300,12 +300,25 @@ async function startCamera() {
   renderPeople();
 
   // ---- 로그 ----
-  function log(msg, strong) {
+  // 로그는 저장소에도 남겨서 새로고침·앱 재시작 후에도 텔레그램 /log 로 볼 수 있게 한다
+  const LOG_MAX = 500;
+  const logs = store.get('logs', []); // [시각(ms), 내용, 강조여부]
+  let logSaveTimer = null;
+  function logLine(t, msg, strong) {
     const d = document.createElement('div');
-    d.innerHTML = `${fmtTime(Date.now())} ${strong ? '<b>' + escapeHtml(msg) + '</b>' : escapeHtml(msg)}`;
+    d.innerHTML = `${fmtTime(t)} ${strong ? '<b>' + escapeHtml(msg) + '</b>' : escapeHtml(msg)}`;
     $('log').prepend(d);
     while ($('log').children.length > 200) $('log').lastChild.remove();
   }
+  function log(msg, strong) {
+    const t = Date.now();
+    logs.push([t, String(msg), strong ? 1 : 0]);
+    if (logs.length > LOG_MAX) logs.splice(0, logs.length - LOG_MAX);
+    clearTimeout(logSaveTimer); logSaveTimer = setTimeout(() => store.set('logs', logs), 1000);
+    logLine(t, msg, strong);
+  }
+  logs.slice(-200).forEach(([t, m, s]) => logLine(t, m, s));
+  window.addEventListener('pagehide', () => store.set('logs', logs));
 
   // ---- 상태 ----
   let stream = null, human = null, match = null, personDet = null;
@@ -549,6 +562,7 @@ async function startCamera() {
     else if (cmd === '/arm') { armed = true; graceUntil = 0; setArmBadge(); log('텔레그램: 감시 재개 (/arm)', true); tgText('🟢 감시를 재개했습니다. 본인 무시 시간도 해제했습니다.'); }
     else if (cmd === '/disarm') { armed = false; setArmBadge(); log('텔레그램: 일시정지 (/disarm)', true); tgText('⏸️ 알림을 일시정지했습니다. /arm 으로 재개합니다.'); }
     else if (cmd === '/status') { tgText(await statusText()); }
+    else if (cmd === '/log') { sendLogs(args[0]); }
     else if (cmd === '/sound') {
       const a = (args[0] || '').toLowerCase();
       if (!['on', 'off', '켜기', '끄기'].includes(a)) return tgText(`🎤 소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n/sound on 또는 /sound off 로 바꿀 수 있습니다.`);
@@ -557,7 +571,34 @@ async function startCamera() {
       tgText(r.ok ? (on ? '🎤 소리 녹음을 켰습니다. 다음 녹화·/clip·실시간 보기부터 소리가 함께 들어갑니다.\n⚠️ 다른 사람들의 대화가 녹음되지 않도록 주의하세요.' : '🔇 소리 녹음을 껐습니다.')
                   : `⚠️ 마이크를 켜지 못했습니다 (${r.err}).\n카메라 폰에서 설정의 '소리 녹음'을 한 번 직접 켜서 마이크 권한을 허용해 주세요.`);
     }
-    else tgText('명령어:\n/status 상태\n/snap 지금 사진\n/clip 10초 영상\n/watch [초] 텔레그램에서 3초마다 바뀌는 화면 (기본 60초)\n/stop 지켜보기 끝내기\n/live 실시간 보기 링크\n/sound on|off 소리 녹음 켜기/끄기\n/arm 감시 재개(본인 무시 해제)\n/disarm 알림 일시정지');
+    else tgText('명령어:\n/status 상태\n/snap 지금 사진\n/clip 10초 영상\n/watch [초] 텔레그램에서 3초마다 바뀌는 화면 (기본 60초)\n/stop 지켜보기 끝내기\n/live 실시간 보기 링크\n/sound on|off 소리 녹음 켜기/끄기\n/log [개수] 최근 로그 (기본 30줄, /log all 전체 파일, /log clear 지우기)\n/arm 감시 재개(본인 무시 해제)\n/disarm 알림 일시정지');
+  }
+  // /log [개수|all|clear]
+  function sendLogs(arg) {
+    const a = (arg || '').toLowerCase();
+    const line = ([t, m, s]) => `${fmtDT(t).slice(5)} ${s ? '★ ' : ''}${m}`;
+    if (a === 'clear' || a === '지우기') {
+      logs.length = 0; store.set('logs', logs); $('log').innerHTML = '';
+      log('텔레그램: 로그 지움 (/log clear)');
+      return tgText('🧹 로그를 지웠습니다.');
+    }
+    if (!logs.length) return tgText('📋 쌓인 로그가 없습니다.');
+    if (a === 'all' || a === '전체') {
+      const txt = logs.map(([t, m, s]) => `${fmtDT(t)} ${s ? '★ ' : ''}${m}`).join('\n');
+      const blob = new Blob(['﻿' + txt], { type: 'text/plain' });
+      return tgSend('sendDocument', { caption: `📋 전체 로그 ${logs.length}줄 (${fmtDT(logs[0][0])} ~)` },
+                    { field: 'document', blob, name: `securecam-log-${fmtDT(Date.now()).slice(0, 10)}.txt` });
+    }
+    const n = Math.min(200, Math.max(1, parseInt(a) || 30));
+    const lines = logs.slice(-n).map(line);
+    // 텔레그램 메시지 한 개는 4096자 제한 → 나눠서 보냄
+    const chunks = []; let cur = `📋 최근 로그 ${lines.length}줄 (전체 ${logs.length}줄)`;
+    for (const l of lines) {
+      if (cur.length + l.length + 1 > 3900) { chunks.push(cur); cur = ''; }
+      cur += (cur ? '\n' : '') + l;
+    }
+    chunks.push(cur);
+    chunks.forEach(c => tgText(c));
   }
   async function statusText() {
     let bat = '';
