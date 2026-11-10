@@ -195,7 +195,9 @@ function startViewer(camId, key, turn) {
   $('viewer').classList.remove('hidden');
   const video = $('vVideo'), badge = $('vBadge'), hint = $('vHint');
   const baseHint = hint.textContent;
-  let peer, timer, failTimer, gotStream = false;
+  let peer, timer, failTimer, pingTimer, connGen = 0, gotStream = false;
+  const vid = rand(10); // 이 시청 화면의 고유 번호 (재접속 시 카메라가 예전 연결을 정리하는 데 사용)
+  window.addEventListener('pagehide', () => { try { peer && peer.destroy(); } catch {} });
   const setBadge = (t, cls) => { badge.textContent = t; badge.className = 'badge ' + (cls || ''); };
   const inApp = /Telegram|KAKAOTALK|; wv\)/i.test(navigator.userAgent);
   const failHint = (why) => {
@@ -207,8 +209,10 @@ function startViewer(camId, key, turn) {
   };
 
   function connect() {
-    clearTimeout(timer); clearTimeout(failTimer);
+    const gen = ++connGen; // 이전 연결에서 늦게 오는 이벤트는 무시
+    clearTimeout(timer); clearTimeout(failTimer); clearInterval(pingTimer);
     if (peer) try { peer.destroy(); } catch {}
+    let busy = false;
     gotStream = false; hint.textContent = baseHint;
     setBadge('1/3 서버 연결 중');
     peer = new Peer({ config: iceConfig(turn) });
@@ -216,12 +220,19 @@ function startViewer(camId, key, turn) {
     peer.on('open', () => {
       setBadge('2/3 카메라 찾는 중'); badge.dataset.stage = '카메라 찾기';
       const conn = peer.connect(camId, { reliable: true });
-      conn.on('open', () => { setBadge('3/3 영상 받는 중'); badge.dataset.stage = '영상 받기'; conn.send({ type: 'hello', k: key }); });
-      conn.on('data', (d) => {
-        if (d && d.type === 'denied') { clearTimeout(failTimer); setBadge('인증 실패', 'bad'); hint.textContent = '링크가 만료되었습니다. 텔레그램에서 /live 로 새 링크를 받으세요.'; }
-        if (d && d.type === 'busy') { clearTimeout(failTimer); setBadge('접속자 초과', 'warn'); }
+      conn.on('open', () => {
+        setBadge('3/3 영상 받는 중'); badge.dataset.stage = '영상 받기'; conn.send({ type: 'hello', k: key, v: vid, hb: 1 });
+        clearInterval(pingTimer); pingTimer = setInterval(() => { try { conn.open && conn.send({ type: 'ping' }); } catch {} }, 5000);
       });
-      conn.on('close', () => { setBadge('끊김', 'warn'); timer = setTimeout(connect, 5000); });
+      conn.on('data', (d) => {
+        if (d && d.type === 'denied') { busy = true; clearTimeout(failTimer); setBadge('인증 실패', 'bad'); hint.textContent = '링크가 만료되었습니다. 텔레그램에서 /live 로 새 링크를 받으세요.'; }
+        if (d && d.type === 'busy') {
+          busy = true; clearTimeout(failTimer); setBadge('접속자 초과', 'warn');
+          hint.textContent = `이미 ${d.max || 3}명이 보고 있습니다. 다른 기기에서 보기를 닫으면 들어갈 수 있습니다. 15초 뒤 다시 시도합니다.`;
+          clearTimeout(timer); timer = setTimeout(connect, 15000);
+        }
+      });
+      conn.on('close', () => { if (gen !== connGen) return; clearInterval(pingTimer); if (busy) return; setBadge('끊김', 'warn'); clearTimeout(timer); timer = setTimeout(connect, 5000); });
       // 데이터 연결의 P2P 경로가 실패하는지 감시
       const watchIce = () => { const pc = conn.peerConnection; if (!pc) return setTimeout(watchIce, 300);
         pc.addEventListener('iceconnectionstatechange', () => { if (pc.iceConnectionState === 'failed' && !gotStream) { clearTimeout(failTimer); setBadge('연결 실패', 'bad'); failHint('두 휴대폰 사이에 직접 연결 경로를 찾지 못했습니다.'); } }); };
@@ -234,6 +245,7 @@ function startViewer(camId, key, turn) {
       call.on('close', () => setBadge('끊김', 'warn'));
     });
     peer.on('error', (e) => {
+      if (gen !== connGen) return;
       clearTimeout(failTimer);
       if (e.type === 'peer-unavailable') { setBadge('카메라 꺼짐', 'bad'); hint.textContent = '카메라 폰에서 감시가 꺼져 있거나 화면이 꺼져 있습니다. 8초 뒤 다시 시도합니다.'; }
       else { setBadge('오류', 'bad'); hint.textContent = '오류: ' + e.type + ' — 8초 뒤 다시 시도합니다.'; }
@@ -604,7 +616,7 @@ async function startCamera() {
     let bat = '';
     try { const b = await navigator.getBattery(); bat = `\n배터리: ${Math.round(b.level * 100)}% ${b.charging ? '(충전 중)' : '(충전 안 함!)'}`; } catch {}
     const g = Date.now() < graceUntil ? `\n본인 무시 중: ${fmtTime(graceUntil)}까지` : '';
-    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
+    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n실시간 시청: ${live.calls.size}/${live.MAX}명\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
   }
 
   // ---- 실시간 보기 (PeerJS / WebRTC) ----
@@ -623,14 +635,21 @@ async function startCamera() {
       const peer = this.peer = new Peer(this.id, { config: iceConfig(S.turnUrl ? { u: S.turnUrl, n: S.turnUser, p: S.turnPass } : null) });
       peer.on('open', () => { $('liveInfo').textContent = '실시간 보기 준비됨. 링크를 받을 휴대폰으로 보내세요 (텔레그램 /live).'; $('btnCopyLive').disabled = false; });
       peer.on('connection', (conn) => {
+        let call = null;
         conn.on('data', (d) => {
-          if (!d || d.type !== 'hello') return;
+          if (!d) return;
+          if (d.type === 'ping') { if (call) call.lastPing = Date.now(); return; }
+          if (d.type !== 'hello' || call) return;
           if (d.k !== this.key) { conn.send({ type: 'denied' }); setTimeout(() => conn.close(), 500); log('실시간 보기: 잘못된 키로 접속 시도'); return; }
-          if (this.calls.size >= this.MAX) { conn.send({ type: 'busy' }); return; }
-          const call = peer.call(conn.peer, stream);
-          call.viewer = conn.peer; call.conn = conn; this.calls.add(call); log('실시간 보기 접속');
-          const end = () => { this.calls.delete(call); };
-          call.on('close', end); call.on('error', end); conn.on('close', () => { try { call.close(); } catch {} end(); });
+          // 같은 시청 화면이 다시 접속하면 예전 연결은 정리
+          if (d.v) for (const c of [...this.calls]) if (c.vid === d.v) this.endCall(c, '같은 기기 재접속');
+          this.prune();
+          if (this.calls.size >= this.MAX) { conn.send({ type: 'busy', max: this.MAX }); setTimeout(() => conn.close(), 1000); log(`실시간 보기: 접속자 초과 (${this.calls.size}/${this.MAX})`); return; }
+          call = peer.call(conn.peer, stream);
+          Object.assign(call, { vid: d.v || null, conn, hb: !!d.hb, started: Date.now(), lastPing: Date.now(), badSince: 0, ok: false });
+          this.calls.add(call); log(`실시간 보기 접속 (${this.calls.size}/${this.MAX})`);
+          call.on('close', () => this.endCall(call)); call.on('error', () => this.endCall(call, '오류'));
+          conn.on('close', () => this.endCall(call));
         });
       });
       peer.on('disconnected', () => { setTimeout(() => { if (this.peer === peer && !peer.destroyed) peer.reconnect(); }, 3000); });
@@ -646,8 +665,28 @@ async function startCamera() {
     refreshCalls() { // 카메라를 다시 열었을 때 기존 시청자에게 새 영상 전달
       for (const c of this.calls) { try { const s = c.peerConnection.getSenders().find(x => x.track && x.track.kind === 'video'); s && s.replaceTrack(stream.getVideoTracks()[0]); } catch {} }
     },
+    endCall(c, why) {
+      if (!this.calls.delete(c)) return;
+      try { c.conn && c.conn.close(); } catch {} try { c.close(); } catch {}
+      log(`실시간 보기 종료${why ? ` (${why})` : ''} · 남은 시청 ${this.calls.size}명`);
+    },
+    // 끊겼는데 종료 신호가 안 온 접속(브라우저를 그냥 닫음, 화면 꺼짐, 연결 실패 등)을 정리해 자리를 비운다
+    prune() {
+      const now = Date.now();
+      for (const c of [...this.calls]) {
+        const pc = c.peerConnection;
+        const st = pc ? pc.connectionState : 'new', ice = pc ? pc.iceConnectionState : 'new';
+        const ok = st === 'connected' || ice === 'connected' || ice === 'completed';
+        if (ok) { c.ok = true; c.badSince = 0; } else if (c.ok && !c.badSince) c.badSince = now;
+        if (st === 'failed' || st === 'closed' || ice === 'failed' || ice === 'closed') this.endCall(c, '연결 끊김');
+        else if (!c.ok && now - c.started > 30000) this.endCall(c, '연결되지 않음');
+        else if (c.badSince && now - c.badSince > 15000) this.endCall(c, '연결 끊김');
+        else if (c.hb && now - c.lastPing > 20000) this.endCall(c, '응답 없음');
+      }
+    },
     stop() { if (this.peer) { try { this.peer.destroy(); } catch {} } this.peer = null; this.calls.clear(); },
   };
+  setInterval(() => live.calls.size && live.prune(), 5000);
   $('btnCopyLive').onclick = async () => { live.ensureIds(); try { await navigator.clipboard.writeText(live.url); alert('복사했습니다'); } catch { prompt('링크', live.url); } };
   $('btnResetLive').onclick = () => {
     if (!confirm('기존 실시간 보기 링크가 더 이상 작동하지 않게 됩니다. 새로 만들까요?')) return;
