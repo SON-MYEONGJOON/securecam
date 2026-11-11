@@ -142,7 +142,16 @@
 <!-- ============ 뷰어 모드 ============ -->
 <main id="viewer" class="hidden">
   <h1>📡 보안캠 실시간 보기 <span id="vBadge" class="badge">연결 중</span></h1>
-  <video id="vVideo" playsinline autoplay muted controls></video>
+  <div id="vWrap" style="position:relative; overflow:hidden; border-radius:12px; touch-action:pan-y">
+    <video id="vVideo" playsinline autoplay muted controls style="display:block; transform-origin:center center"></video>
+  </div>
+  <div id="vZoomRow" class="row hidden" style="margin-top:10px; align-items:center; flex-wrap:nowrap">
+    <span>🔍</span>
+    <input id="vZoom" type="range" min="1" max="4" step="0.1" value="1" style="flex:1; min-width:0">
+    <span id="vZoomVal" style="min-width:3.2em; text-align:right">1.0x</span>
+    <button id="vZoomReset">원래대로</button>
+  </div>
+  <div id="vZoomHint" class="hint hidden"></div>
   <div class="row" style="margin-top:10px">
     <button id="vReconnect">다시 연결</button>
     <button id="vSnap">사진 저장</button>
@@ -234,6 +243,8 @@ function startViewer(camId, key, turn) {
         clearInterval(pingTimer); pingTimer = setInterval(() => { try { conn.open && conn.send({ type: 'ping' }); } catch {} }, 5000);
       });
       conn.on('data', (d) => {
+        if (d && d.type === 'zoomcap') zoomSetup(d.caps);
+        if (d && d.type === 'zoomval') zoomShow(d.v);
         if (d && d.type === 'replaced') { // 같은 폰의 다른 화면이 접속해서 이 화면은 밀려남 → 서로 밀어내지 않게 자동 재접속 안 함
           busy = true; clearTimeout(failTimer); clearTimeout(timer); setBadge('다른 화면에서 보는 중', 'warn');
           hint.textContent = '이 폰의 다른 화면(탭)에서 실시간 보기를 열어서 이 화면은 멈췄습니다. 여기서 보려면 [다시 연결]을 누르세요.';
@@ -271,6 +282,44 @@ function startViewer(camId, key, turn) {
     video.muted = !video.muted; video.play().catch(() => {});
     $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
   };
+  // ---- 줌 슬라이더 ----
+  // 감시폰 카메라가 줌을 지원하면 '카메라 줌'(감시폰 카메라 자체를 확대, 화질 좋음, 다른 시청자·녹화에도 적용)
+  // 지원하지 않으면 '화면 확대'(이 화면에서만 확대, 손가락으로 끌어서 위치 이동)
+  const zm = { mode: 'digital', scale: 1, x: 0, y: 0, sendTimer: null, drag: null };
+  const zEl = $('vZoom'), zVal = $('vZoomVal'), wrap = $('vWrap');
+  function zoomSetup(caps) {
+    if (caps) {
+      zm.mode = 'camera'; zEl.min = caps.min; zEl.max = caps.max; zEl.step = caps.step || 0.1; zEl.value = caps.value;
+      $('vZoomHint').textContent = '감시폰 카메라 자체를 확대합니다. 다른 시청자 화면과 감시(사람 감지)·녹화도 확대된 화면 기준이 되니, 다 보면 [원래대로]를 눌러 주세요.';
+    } else {
+      zm.mode = 'digital'; zEl.min = 1; zEl.max = 4; zEl.step = 0.1; zEl.value = zm.scale;
+      $('vZoomHint').textContent = '이 화면에서만 확대합니다 (감시폰 카메라는 그대로). 확대한 뒤 화면을 손가락으로 끌어서 보고 싶은 곳으로 옮기세요.';
+    }
+    resetDigital();
+    zVal.textContent = `${Number(zEl.value).toFixed(1)}x`;
+    $('vZoomRow').classList.remove('hidden'); $('vZoomHint').classList.remove('hidden');
+  }
+  function zoomShow(v) { if (zm.mode !== 'camera') return; zEl.value = v; zVal.textContent = `${Number(v).toFixed(1)}x`; }
+  function applyDigital() {
+    const w = wrap.clientWidth, h = wrap.clientHeight, mx = (zm.scale - 1) * w / 2, my = (zm.scale - 1) * h / 2;
+    zm.x = Math.max(-mx, Math.min(mx, zm.x)); zm.y = Math.max(-my, Math.min(my, zm.y));
+    video.style.transform = zm.scale > 1 ? `translate(${zm.x}px, ${zm.y}px) scale(${zm.scale})` : '';
+    video.controls = zm.scale <= 1; // 확대 중에는 재생 컨트롤이 같이 커져 가리므로 숨김
+    wrap.style.touchAction = zm.scale > 1 ? 'none' : 'pan-y';
+  }
+  function resetDigital() { zm.scale = 1; zm.x = zm.y = 0; applyDigital(); }
+  zEl.addEventListener('input', () => {
+    const v = Number(zEl.value); zVal.textContent = `${v.toFixed(1)}x`;
+    if (zm.mode === 'digital') { zm.scale = v; applyDigital(); return; }
+    clearTimeout(zm.sendTimer); // 슬라이더를 움직이는 동안 너무 자주 보내지 않게
+    zm.sendTimer = setTimeout(() => { try { curConn && curConn.open && curConn.send({ type: 'zoom', v }); } catch {} }, 120);
+  });
+  $('vZoomReset').onclick = () => { zEl.value = zEl.min; zEl.dispatchEvent(new Event('input')); };
+  wrap.addEventListener('pointerdown', (e) => { if (zm.mode !== 'digital' || zm.scale <= 1) return; zm.drag = { px: e.clientX, py: e.clientY, x: zm.x, y: zm.y }; wrap.setPointerCapture(e.pointerId); });
+  wrap.addEventListener('pointermove', (e) => { if (!zm.drag) return; zm.x = zm.drag.x + e.clientX - zm.drag.px; zm.y = zm.drag.y + e.clientY - zm.drag.py; applyDigital(); });
+  const endDrag = () => { zm.drag = null; };
+  wrap.addEventListener('pointerup', endDrag); wrap.addEventListener('pointercancel', endDrag);
+
   // 통화 중 소리 레벨 표시: 감시폰 소리가 도착하는데 안 들리는지(스피커/볼륨 문제), 아예 안 오는지 구분
   const meter = { ctx: null, timer: null };
   function startMeter() {
@@ -425,14 +474,38 @@ async function startCamera() {
     const [w, h] = S.camRes.split('x').map(Number);
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
-      video: { facingMode: { ideal: S.camFacing }, width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 15, max: 20 } },
+      // zoom: true → 폰 카메라가 줌을 지원하면 실시간 보기에서 원격으로 확대/축소할 수 있게 (지원 안 하면 무시됨)
+      video: { facingMode: { ideal: S.camFacing }, width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 15, max: 20 }, zoom: true },
     });
     video.srcObject = stream;
     await video.play();
     await new Promise(r => video.videoWidth ? r() : video.onloadedmetadata = r);
     overlay.width = video.videoWidth; overlay.height = video.videoHeight;
     if (S.audioOn) await attachAudio().catch(e => log('마이크 켜기 실패: ' + e.message));
-    if (live.peer) live.refreshCalls();
+    if (camZoom.cur != null) await setCamZoom(camZoom.cur).catch(() => {}); // 카메라를 다시 열어도 줌 유지
+    if (live.peer) { live.refreshCalls(); live.sendZoomCaps(); }
+  }
+
+  // ---- 카메라 줌 (폰 카메라 자체의 줌: 화질 그대로 확대, 감지·녹화도 확대된 화면 기준) ----
+  const camZoom = { cur: store.get('zoom', null), logTimer: null };
+  function zoomCaps() {
+    try {
+      const t = stream && stream.getVideoTracks()[0];
+      const c = t && t.getCapabilities && t.getCapabilities().zoom;
+      if (!c || !(c.max > c.min)) return null;
+      return { min: c.min, max: c.max, step: c.step || 0.1, value: t.getSettings().zoom ?? c.min };
+    } catch { return null; }
+  }
+  async function setCamZoom(v, who) {
+    const c = zoomCaps(); if (!c) return null;
+    v = Math.min(c.max, Math.max(c.min, Number(v) || c.min));
+    await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom: v }] });
+    camZoom.cur = v; store.set('zoom', v);
+    if (who) {
+      for (const k of live.calls) { try { k.conn.send({ type: 'zoomval', v }); } catch {} }
+      clearTimeout(camZoom.logTimer); camZoom.logTimer = setTimeout(() => log(`🔍 카메라 줌 x${v.toFixed(1)} (${who})`), 1500);
+    }
+    return v;
   }
 
   // ---- 소리 (마이크) ----
@@ -751,7 +824,7 @@ async function startCamera() {
     let bat = '';
     try { const b = await batteryInfo(); if (b) bat = `\n배터리: ${batteryText(b)}`; } catch {}
     const g = Date.now() < graceUntil ? `\n본인 무시 중: ${fmtTime(graceUntil)}까지` : '';
-    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n실시간 시청: ${live.calls.size}/${live.MAX}명\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
+    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n실시간 시청: ${live.calls.size}/${live.MAX}명${zoomCaps() ? `\n카메라 줌: x${(zoomCaps().value || 1).toFixed(1)}` : ''}\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
   }
 
   // ---- 실시간 보기 (PeerJS / WebRTC) ----
@@ -774,6 +847,7 @@ async function startCamera() {
         conn.on('data', (d) => {
           if (!d) return;
           if (d.type === 'ping') { if (call) call.lastPing = Date.now(); return; }
+          if (d.type === 'zoom') { if (call) setCamZoom(d.v, call.who).catch(e => log('카메라 줌 실패: ' + e.message)); return; }
           if (d.type === 'talk') { if (call) { call.talking = !!d.on; log(`🎙️ ${call.who} ${d.on ? '통화 시작' : '통화 끝'}`); this.talkUi(); } return; }
           if (d.type !== 'hello' || call) return;
           if (d.k !== this.key) { conn.send({ type: 'denied' }); setTimeout(() => conn.close(), 500); log('실시간 보기: 잘못된 키로 접속 시도'); return; }
@@ -785,6 +859,7 @@ async function startCamera() {
           call = peer.call(conn.peer, stream);
           Object.assign(call, { vid: d.v || null, who, conn, hb: !!d.hb, started: Date.now(), lastPing: Date.now(), badSince: 0, ok: false });
           this.calls.add(call); log(`실시간 보기 접속: ${who} · 현재 시청 ${this.calls.size}/${this.MAX}명`);
+          try { conn.send({ type: 'zoomcap', caps: zoomCaps() }); } catch {}
           call.on('close', () => this.endCall(call)); call.on('error', () => this.endCall(call, '오류'));
           conn.on('close', () => this.endCall(call));
         });
@@ -817,6 +892,7 @@ async function startCamera() {
     refreshCalls() { // 카메라를 다시 열었을 때 기존 시청자에게 새 영상 전달
       for (const c of this.calls) { try { const s = c.peerConnection.getSenders().find(x => x.track && x.track.kind === 'video'); s && s.replaceTrack(stream.getVideoTracks()[0]); } catch {} }
     },
+    sendZoomCaps() { const caps = zoomCaps(); for (const c of this.calls) { try { c.conn.send({ type: 'zoomcap', caps }); } catch {} } },
     talkUi() { // 감시폰 화면에 누가 말하는 중인지 표시
       const who = [...this.calls].filter(c => c.talking).map(c => c.who);
       const el = $('talkBanner'); if (!el) return;
