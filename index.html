@@ -49,6 +49,7 @@
   <div class="stage card" style="padding:0">
     <video id="video" playsinline muted autoplay></video>
     <canvas id="overlay"></canvas>
+    <div id="talkBanner" style="display:none; position:absolute; left:8px; right:8px; bottom:8px; padding:8px 12px; border-radius:8px; background:rgba(220,38,38,.85); color:#fff; font-weight:700; text-align:center; z-index:2"></div>
     <div id="statusBar"></div>
   </div>
 
@@ -145,6 +146,7 @@
     <button id="vReconnect">다시 연결</button>
     <button id="vSnap">사진 저장</button>
     <button id="vSound" class="hidden">🔊 소리 켜기</button>
+    <button id="vTalk" class="hidden">🎙️ 말하기</button>
   </div>
   <div class="hint" id="vHint">카메라 휴대폰과 P2P(WebRTC)로 연결합니다. 일부 모바일 데이터망에서는 연결이 안 될 수 있습니다. 그럴 땐 텔레그램에서 /watch, /snap, /clip 을 사용하세요.</div>
 </main>
@@ -195,7 +197,9 @@ function startViewer(camId, key, turn) {
   $('viewer').classList.remove('hidden');
   const video = $('vVideo'), badge = $('vBadge'), hint = $('vHint');
   const baseHint = hint.textContent;
-  let peer, timer, failTimer, pingTimer, connGen = 0, gotStream = false;
+  let peer, timer, failTimer, pingTimer, connGen = 0, gotStream = false, curConn = null;
+  // 말하기(인터폰): 내 마이크를 감시폰으로 보내 스피커로 재생. 말하는 동안은 울림 방지를 위해 감시폰 소리를 잠시 끈다
+  const talk = { mic: null, call: null, on: false, prevMuted: true };
   // 이 폰(브라우저)의 시청 번호. 저장해 두고 계속 같은 번호를 써서, 링크를 다시 열면 카메라가 예전 접속을 바로 정리한다
   const vid = (() => { try { let v = localStorage.getItem('scam.vid'); if (!v) { v = rand(10); localStorage.setItem('scam.vid', v); } return v; } catch { return rand(10); } })();
   window.addEventListener('pagehide', () => { try { peer && peer.destroy(); } catch {} });
@@ -212,6 +216,8 @@ function startViewer(camId, key, turn) {
   function connect() {
     const gen = ++connGen; // 이전 연결에서 늦게 오는 이벤트는 무시
     clearTimeout(timer); clearTimeout(failTimer); clearInterval(pingTimer);
+    if (talk.on) setTalk(false);
+    talk.call = null; curConn = null; $('vTalk').classList.add('hidden');
     if (peer) try { peer.destroy(); } catch {}
     let busy = false;
     gotStream = false; hint.textContent = baseHint;
@@ -220,7 +226,7 @@ function startViewer(camId, key, turn) {
     failTimer = setTimeout(() => { if (!gotStream) { setBadge('연결 실패', 'bad'); failHint(`'${badge.dataset.stage || '연결'}' 단계에서 25초 동안 진행되지 않았습니다.`); } }, 25000);
     peer.on('open', () => {
       setBadge('2/3 카메라 찾는 중'); badge.dataset.stage = '카메라 찾기';
-      const conn = peer.connect(camId, { reliable: true });
+      const conn = curConn = peer.connect(camId, { reliable: true });
       conn.on('open', () => {
         setBadge('3/3 영상 받는 중'); badge.dataset.stage = '영상 받기'; conn.send({ type: 'hello', k: key, v: vid, hb: 1 });
         clearInterval(pingTimer); pingTimer = setInterval(() => { try { conn.open && conn.send({ type: 'ping' }); } catch {} }, 5000);
@@ -246,7 +252,8 @@ function startViewer(camId, key, turn) {
     peer.on('call', (call) => {
       call.answer();
       call.on('stream', (s) => { gotStream = true; clearTimeout(failTimer); hint.textContent = baseHint; video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok');
-        $('vSound').classList.toggle('hidden', !s.getAudioTracks().length); $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기'; });
+        $('vSound').classList.toggle('hidden', !s.getAudioTracks().length); $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
+        $('vTalk').classList.remove('hidden'); });
       call.on('close', () => { if (gen !== connGen || busy) return; setBadge('끊김', 'warn'); });
     });
     peer.on('error', (e) => {
@@ -261,6 +268,36 @@ function startViewer(camId, key, turn) {
   $('vSound').onclick = () => {
     video.muted = !video.muted; video.play().catch(() => {});
     $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
+  };
+  function setTalk(on) {
+    talk.on = on;
+    if (talk.mic) talk.mic.getAudioTracks().forEach(t => t.enabled = on);
+    if (on) { talk.prevMuted = video.muted; video.muted = true; }        // 내 목소리가 되돌아와 울리지 않게
+    else { video.muted = talk.prevMuted; video.play().catch(() => {}); }
+    try { curConn && curConn.open && curConn.send({ type: 'talk', on }); } catch {}
+    const b = $('vTalk'); b.textContent = on ? '🔴 말하는 중 · 누르면 끝' : '🎙️ 말하기'; b.classList.toggle('danger', on);
+    $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
+    if (on) hint.textContent = '말하는 중입니다. 감시폰 스피커로 내 목소리가 나갑니다. 대답을 들으려면 [말하는 중]을 눌러 끄세요. (말하는 동안은 울림 방지를 위해 감시폰 소리가 꺼집니다)';
+    else hint.textContent = (video.srcObject && video.srcObject.getAudioTracks().length) ? baseHint
+      : '감시폰의 소리 녹음이 꺼져 있어 대답은 들리지 않습니다. 텔레그램에서 /sound on 을 보내면 들립니다.';
+  }
+  $('vTalk').onclick = async () => {
+    if (talk.on) return setTalk(false);
+    const b = $('vTalk'); b.disabled = true;
+    try {
+      if (!talk.mic || !talk.mic.getAudioTracks().some(t => t.readyState === 'live'))
+        talk.mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+      if (!talk.call) { // 처음 한 번 감시폰으로 음성 통화를 연결해 두고, 이후에는 마이크만 켜고 끈다
+        talk.mic.getAudioTracks().forEach(t => t.enabled = false);
+        const c = talk.call = peer.call(camId, talk.mic, { metadata: { talk: 1, v: vid } });
+        c.on('close', () => { if (talk.call === c) { talk.call = null; if (talk.on) setTalk(false); } });
+        c.on('error', () => { if (talk.call === c) talk.call = null; });
+      }
+      setTalk(true);
+    } catch (e) {
+      hint.innerHTML = `<b>마이크를 쓸 수 없습니다 (${escapeHtml(e.message || e.name)}).</b><br>브라우저의 마이크 권한을 허용해 주세요.` +
+        (inApp ? '<br>텔레그램 안의 브라우저에서는 마이크가 안 될 수 있습니다. ⋮ → <b>Chrome에서 열기</b>로 열어 주세요.' : '');
+    } finally { b.disabled = false; }
   };
   $('vSnap').onclick = () => {
     if (!video.videoWidth) return;
@@ -692,6 +729,7 @@ async function startCamera() {
         conn.on('data', (d) => {
           if (!d) return;
           if (d.type === 'ping') { if (call) call.lastPing = Date.now(); return; }
+          if (d.type === 'talk') { if (call) { call.talking = !!d.on; log(`🎙️ ${call.who} ${d.on ? '말하기 시작' : '말하기 끝'}`); this.talkUi(); } return; }
           if (d.type !== 'hello' || call) return;
           if (d.k !== this.key) { conn.send({ type: 'denied' }); setTimeout(() => conn.close(), 500); log('실시간 보기: 잘못된 키로 접속 시도'); return; }
           // 같은 시청 화면이 다시 접속하면 예전 연결은 정리
@@ -706,6 +744,21 @@ async function startCamera() {
           conn.on('close', () => this.endCall(call));
         });
       });
+      // 말하기(인터폰): 접속 중인 시청자가 보낸 음성 통화만 받아서 스피커로 재생
+      peer.on('call', (mc) => {
+        const owner = [...this.calls].find(c => c.conn && c.conn.peer === mc.peer);
+        if (!owner || !(mc.metadata && mc.metadata.talk)) { try { mc.close(); } catch {} return; }
+        if (owner.talk) { try { owner.talk.close(); } catch {} }
+        owner.talk = mc; mc.answer();
+        mc.on('stream', (s) => {
+          if (mc.audioEl) return;
+          const a = mc.audioEl = new Audio(); a.autoplay = true; a.volume = 1; a.srcObject = s;
+          document.body.appendChild(a);
+          a.play().catch(e => log('말하기 소리 재생 실패: ' + e.message));
+        });
+        const cleanup = () => { if (mc.audioEl) { mc.audioEl.srcObject = null; mc.audioEl.remove(); mc.audioEl = null; } if (owner.talk === mc) { owner.talk = null; owner.talking = false; this.talkUi(); } };
+        mc.on('close', cleanup); mc.on('error', cleanup);
+      });
       peer.on('disconnected', () => { setTimeout(() => { if (this.peer === peer && !peer.destroyed) peer.reconnect(); }, 3000); });
       peer.on('error', (e) => {
         if (e.type === 'unavailable-id') { $('liveInfo').textContent = '이전 연결 정리 중… 잠시 후 재시도'; setTimeout(() => running && this.start(), 15000); }
@@ -713,14 +766,21 @@ async function startCamera() {
       });
     },
     restartCalls() { // 소리 트랙이 바뀌면 시청자가 자동으로 다시 접속하도록 연결을 닫는다
-      for (const c of [...this.calls]) { try { c.conn && c.conn.close(); c.close(); } catch {} }
+      for (const c of [...this.calls]) { try { c.talk && c.talk.close(); c.conn && c.conn.close(); c.close(); } catch {} }
       this.calls.clear();
     },
     refreshCalls() { // 카메라를 다시 열었을 때 기존 시청자에게 새 영상 전달
       for (const c of this.calls) { try { const s = c.peerConnection.getSenders().find(x => x.track && x.track.kind === 'video'); s && s.replaceTrack(stream.getVideoTracks()[0]); } catch {} }
     },
+    talkUi() { // 감시폰 화면에 누가 말하는 중인지 표시
+      const who = [...this.calls].filter(c => c.talking).map(c => c.who);
+      const el = $('talkBanner'); if (!el) return;
+      el.textContent = who.length ? `🔊 ${who.join(', ')} 말하는 중` : ''; el.style.display = who.length ? 'block' : 'none';
+    },
     endCall(c, why) {
+      if (c.talk) { try { c.talk.close(); } catch {} }
       if (!this.calls.delete(c)) return;
+      if (c.talking) { c.talking = false; this.talkUi(); }
       const conn = c.conn; // 'replaced' 알림이 먼저 도착하도록 같은 기기 재접속이면 조금 늦게 닫는다
       setTimeout(() => { try { c.close(); } catch {} try { conn && conn.close(); } catch {} }, why === '같은 기기에서 다시 열림' ? 800 : 0);
       log(`실시간 보기 종료: ${c.who || '시청자'}${why ? ` (${why})` : ''} · 현재 시청 ${this.calls.size}/${this.MAX}명`);
@@ -739,7 +799,10 @@ async function startCamera() {
         else if (c.hb && now - c.lastPing > 20000) this.endCall(c, '응답 없음');
       }
     },
-    stop() { if (this.peer) { try { this.peer.destroy(); } catch {} } this.peer = null; this.calls.clear(); },
+    stop() {
+      for (const c of this.calls) if (c.talk && c.talk.audioEl) { c.talk.audioEl.srcObject = null; c.talk.audioEl.remove(); }
+      if (this.peer) { try { this.peer.destroy(); } catch {} } this.peer = null; this.calls.clear(); this.talkUi();
+    },
   };
   setInterval(() => live.calls.size && live.prune(), 5000);
   $('btnCopyLive').onclick = async () => { live.ensureIds(); try { await navigator.clipboard.writeText(live.url); alert('복사했습니다'); } catch { prompt('링크', live.url); } };
