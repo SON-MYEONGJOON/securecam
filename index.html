@@ -113,7 +113,7 @@
     </div>
     <label><input id="instantAlert" type="checkbox"> 낯선 얼굴이 보이면 사라지기 전에 사진 먼저 보내기</label>
     <label><input id="audioOn" type="checkbox"> 🎤 소리 녹음 (녹화 영상 · 실시간 보기 · /clip)</label>
-    <label><input id="echoCancel" type="checkbox"> 🔁 통화 에코 제거 (실시간 보기 통화에서 되울림 줄이기. 폰에 따라 통화 중 이쪽 소리가 안 갈 수 있음 · 텔레그램 /echo on|off)</label>
+    <label><input id="echoCancel" type="checkbox" checked> 🔁 통화 에코 제거 (실시간 보기 통화에서 되울림 줄이기. 폰에 따라 통화 중 이쪽 소리가 안 갈 수 있음 · 텔레그램 /echo on|off)</label>
     <div class="hint" style="color:var(--warn)">⚠️ 내가 참여하지 않은 다른 사람들의 대화를 녹음하면 통신비밀보호법 위반이 될 수 있습니다. 가족·손님이 있을 때는 끄세요. 텔레그램에서 /sound on, /sound off 로도 바꿀 수 있습니다.</div>
     <div class="hint">'본인 확인 후 무시 시간': 본인 얼굴이 확인되면 이 시간 동안은 얼굴이 안 보이는 움직임(뒷모습 등)도 본인으로 간주합니다. 외출할 때는 텔레그램에서 /arm 을 보내면 바로 해제됩니다.</div>
   </div>
@@ -439,7 +439,7 @@ async function startCamera() {
   const hasAudio = () => !!(stream && stream.getAudioTracks().some(t => t.readyState === 'live'));
   async function attachAudio() {
     if (!stream || hasAudio()) return;
-    // 에코 제거(설정 '통화 에코 제거'): 켜면 통화 때 되울림이 줄지만, 일부 폰은 상대 목소리가 나오는 동안 마이크를 거의 꺼 버림 → 기본은 끔
+    // 에코 제거(설정 '통화 에코 제거', 기본 켬): 통화 때 되울림이 줄어듦. 폰에 따라 감시폰 쪽 소리가 작아지면 /echo off
     const a = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: !!S.echoCancel, noiseSuppression: true, autoGainControl: true }, video: false });
     a.getAudioTracks().forEach(t => stream.addTrack(t));
   }
