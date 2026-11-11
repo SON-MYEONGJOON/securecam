@@ -143,10 +143,8 @@
 <main id="viewer" class="hidden">
   <h1>📡 보안캠 실시간 보기 <span id="vBadge" class="badge">연결 중</span></h1>
   <div id="vBrowserWarn" class="card hidden" style="border:1px solid var(--warn); margin-bottom:10px">
-    <b>⚠️ 삼성 인터넷에서는 실시간 보기가 잘 안 됩니다.</b>
-    <div class="hint" style="margin:6px 0 10px">삼성 인터넷은 같은 와이파이 안에서도 직접 연결을 못 하고 중계 서버로만 연결해서, 연결이 안 되거나 중계 용량을 많이 씁니다.
-      아래 [주소 복사]를 누른 뒤 <b>Chrome</b>이나 <b>웨일</b>에 붙여넣어 여세요.<br>
-      매번 이렇게 하지 않으려면: 폰 설정 → 애플리케이션 → 기본 앱 선택 → 브라우저 앱 → Chrome(또는 웨일)</div>
+    <b id="vWarnTitle"></b>
+    <div id="vWarnBody" class="hint" style="margin:6px 0 10px"></div>
     <div class="row"><button id="vCopyLink" class="primary">주소 복사</button><button id="vWarnClose">이대로 보기</button></div>
   </div>
   <div id="vWrap" style="position:relative; overflow:hidden; border-radius:12px; touch-action:pan-y">
@@ -223,17 +221,48 @@ function startViewer(camId, key, turn) {
   window.addEventListener('pagehide', () => { try { peer && peer.destroy(); } catch {} });
   const setBadge = (t, cls) => { badge.textContent = t; badge.className = 'badge ' + (cls || ''); };
   const inApp = /Telegram|KAKAOTALK|; wv\)/i.test(navigator.userAgent);
-  // 삼성 인터넷: WebRTC 내부 IP를 숨겨 같은 와이파이에서도 직접 연결이 안 됨(중계 서버로만 연결) → Chrome/웨일 안내
+  // 연결 경로 안내: 연결이 실패했거나 중계 서버(TURN)를 거쳐 연결됐을 때만 띄운다.
+  // (삼성 인터넷은 WebRTC 내부 IP를 숨겨 같은 와이파이에서도 중계로만 연결됨 → Chrome/웨일 안내)
   const samsung = /SamsungBrowser/i.test(navigator.userAgent);
-  if (samsung) {
+  const OPEN_TIP = '아래 [주소 복사]를 누른 뒤 <b>Chrome</b>이나 <b>웨일</b>에 붙여넣어 여세요.<br>매번 이렇게 하지 않으려면: 폰 설정 → 애플리케이션 → 기본 앱 선택 → 브라우저 앱 → Chrome(또는 웨일)';
+  let warnClosed = false;
+  function showWarn(kind) {
+    if (warnClosed) return;
+    let title, body;
+    if (kind === 'relay') {
+      title = '⚠️ 중계 서버를 거쳐 연결됐습니다 (중계 용량 사용 중)';
+      body = samsung ? '삼성 인터넷은 같은 와이파이 안에서도 직접 연결을 못 하고 중계 서버로만 연결합니다. ' + OPEN_TIP
+                     : '같은 와이파이에서 보는 중이라면 Chrome이나 웨일에서 열면 직접 연결되어 용량을 쓰지 않습니다. 밖에서 모바일 데이터로 보는 중이면 정상이며, 오래 볼 때는 텔레그램 /watch 를 권장합니다.';
+    } else { // 'fail' (삼성 인터넷일 때만)
+      title = '⚠️ 삼성 인터넷에서는 실시간 보기가 잘 안 됩니다';
+      body = '삼성 인터넷은 같은 와이파이 안에서도 직접 연결을 못 하고 중계 서버로만 연결해서, 중계 서버가 막혀 있으면 연결되지 않습니다. ' + OPEN_TIP;
+    }
+    $('vWarnTitle').textContent = title; $('vWarnBody').innerHTML = body;
     $('vBrowserWarn').classList.remove('hidden');
-    $('vWarnClose').onclick = () => $('vBrowserWarn').classList.add('hidden');
-    $('vCopyLink').onclick = async () => {
-      try { await navigator.clipboard.writeText(location.href); $('vCopyLink').textContent = '✅ 복사됨 · Chrome/웨일에 붙여넣으세요'; }
-      catch { prompt('이 주소를 길게 눌러 복사한 뒤 Chrome/웨일에 붙여넣으세요', location.href); }
-    };
   }
+  function hideWarn() { $('vBrowserWarn').classList.add('hidden'); }
+  $('vWarnClose').onclick = () => { warnClosed = true; hideWarn(); };
+  $('vCopyLink').onclick = async () => {
+    try { await navigator.clipboard.writeText(location.href); $('vCopyLink').textContent = '✅ 복사됨 · Chrome/웨일에 붙여넣으세요'; }
+    catch { prompt('이 주소를 길게 눌러 복사한 뒤 Chrome/웨일에 붙여넣으세요', location.href); }
+  };
+  // 실제로 선택된 연결 경로 확인 (relay = 중계 서버)
+  async function checkRoute(pc, gen) {
+    if (!pc || gen !== connGen) return;
+    try {
+      const stats = await pc.getStats(); let pairId = null; const byId = {};
+      stats.forEach(s => { byId[s.id] = s; if (s.type === 'transport' && s.selectedCandidatePairId) pairId = s.selectedCandidatePairId; });
+      let pair = pairId && byId[pairId];
+      if (!pair) stats.forEach(s => { if (s.type === 'candidate-pair' && s.state === 'succeeded' && (s.nominated || s.selected)) pair = pair || s; });
+      if (!pair) return;
+      const lt = (byId[pair.localCandidateId] || {}).candidateType, rt = (byId[pair.remoteCandidateId] || {}).candidateType;
+      route = `${lt || '?'}/${rt || '?'}`;
+      if (lt === 'relay' || rt === 'relay') showWarn('relay'); else hideWarn();
+    } catch {}
+  }
+  let route = '';
   const failHint = (why) => {
+    if (samsung) showWarn('fail');
     hint.innerHTML = `<b>${why}</b><br>` +
       (samsung ? '· <b>삼성 인터넷</b>으로 열려 있습니다. 위의 [주소 복사]를 눌러 <b>Chrome이나 웨일</b>에서 열면 대부분 해결됩니다.<br>' : '') +
       (inApp ? '· 지금 텔레그램/앱 안의 브라우저입니다. 오른쪽 위 ⋮ → <b>Chrome(브라우저)에서 열기</b>로 다시 열어 보세요.<br>' : '') +
@@ -284,7 +313,9 @@ function startViewer(camId, key, turn) {
       call.answer();
       call.on('stream', (s) => { gotStream = true; clearTimeout(failTimer); hint.textContent = baseHint; video.srcObject = s; video.play().catch(() => {}); setBadge('실시간', 'ok');
         $('vSound').classList.toggle('hidden', !s.getAudioTracks().length); $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
-        $('vTalk').classList.remove('hidden'); });
+        $('vTalk').classList.remove('hidden');
+        setTimeout(() => checkRoute(call.peerConnection, gen), 3000);   // 연결 경로 확인 (중계면 안내)
+        setTimeout(() => checkRoute(call.peerConnection, gen), 20000); });
       call.on('close', () => { if (gen !== connGen || busy) return; setBadge('끊김', 'warn'); });
     });
     peer.on('error', (e) => {
