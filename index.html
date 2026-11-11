@@ -89,9 +89,22 @@
     <h2>⚙️ 감지 설정</h2>
     <div class="row">
       <div><label>카메라</label><select id="camFacing"><option value="environment">후면</option><option value="user">전면</option></select></div>
-      <div><label>해상도</label><select id="camRes"><option value="640x480">640×480 (권장)</option><option value="1280x720">1280×720</option></select></div>
+      <div><label>해상도</label><select id="camRes">
+        <option value="640x480">VGA 640×480 (가벼움)</option>
+        <option value="1280x720">HD 1280×720</option>
+        <option value="1920x1080">FHD 1920×1080</option>
+        <option value="2560x1440">QHD 2560×1440</option>
+        <option value="3840x2160">4K 3840×2160</option>
+      </select></div>
+      <div><label>화면 방향</label><select id="camOrient">
+        <option value="auto">자동 (폰 방향 따라감)</option>
+        <option value="landscape">가로 (넓게)</option>
+        <option value="portrait">세로</option>
+      </select></div>
       <div><label>AI 처리</label><select id="aiDelegate"><option value="CPU">CPU (안정, 권장)</option><option value="GPU">GPU (빠름, 일부 기기 오작동)</option></select><div class="hint" style="margin:2px 0 0">변경 후 새로고침</div></div>
     </div>
+    <div class="hint">해상도가 높을수록 선명하고 멀리 있는 얼굴도 잘 알아보지만, 폰이 더 뜨거워지고 배터리·데이터·중계 용량을 더 씁니다. 24시간 감시는 HD~FHD를 권장합니다. 폰이 지원하지 않는 해상도는 가능한 가장 가까운 값으로 맞춰집니다.<br>
+      '가로'로 넓게 찍으려면 폰을 실제로 <b>옆으로 눕혀서</b> 세워 두세요 (앱에서는 화면도 가로로 고정됩니다).</div>
     <div class="row">
       <div><label>본인이 있을 때</label>
         <select id="ownerMode">
@@ -439,7 +452,7 @@ async function startCamera() {
   const video = $('video'), overlay = $('overlay'), octx = overlay.getContext('2d');
 
   // ---- 설정 ----
-  const FIELDS = ['tgToken','tgChat','camFacing','camRes','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert','audioOn','echoCancel','turnUrl','turnUser','turnPass'];
+  const FIELDS = ['tgToken','tgChat','camFacing','camRes','camOrient','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert','audioOn','echoCancel','turnUrl','turnUser','turnPass'];
   const saved = store.get('settings', {});
   for (const f of FIELDS) {
     const el = $(f); if (saved[f] === undefined) continue;
@@ -520,7 +533,9 @@ async function startCamera() {
   // ---- 카메라 ----
   async function openCamera() {
     if (stream) stream.getTracks().forEach(t => t.stop());
-    const [w, h] = S.camRes.split('x').map(Number);
+    let [w, h] = S.camRes.split('x').map(Number);
+    if (S.camOrient === 'portrait') [w, h] = [Math.min(w, h), Math.max(w, h)]; // 세로: 세로가 긴 영상 요청
+    applyOrientation();
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       // zoom: true → 폰 카메라가 줌을 지원하면 실시간 보기에서 원격으로 확대/축소할 수 있게 (지원 안 하면 무시됨)
@@ -529,10 +544,28 @@ async function startCamera() {
     video.srcObject = stream;
     await video.play();
     await new Promise(r => video.videoWidth ? r() : video.onloadedmetadata = r);
-    overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+    overlay.width = video.videoWidth; overlay.height = video.videoHeight; fitStage();
+    log(`카메라 ${video.videoWidth}×${video.videoHeight} (요청 ${S.camRes}${S.camOrient !== 'auto' ? ', ' + (S.camOrient === 'landscape' ? '가로' : '세로') : ''})`);
     if (S.audioOn) await attachAudio().catch(e => log('마이크 켜기 실패: ' + e.message));
     if (camZoom.cur != null) await setCamZoom(camZoom.cur).catch(() => {}); // 카메라를 다시 열어도 줌 유지
     if (live.peer) { live.refreshCalls(); live.sendZoomCaps(); }
+  }
+
+  // 미리보기 틀을 실제 영상 비율(가로/세로)에 맞춘다
+  function fitStage() { const st = document.querySelector('.stage'); if (st && video.videoWidth) st.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`; }
+  // 화면 방향: 안드로이드 앱이면 화면을 가로/세로로 고정 (Chrome에서는 폰을 직접 돌려 두기)
+  function applyOrientation() {
+    try { if (window.SecureCamNative && SecureCamNative.setOrientation) SecureCamNative.setOrientation(S.camOrient || 'auto'); } catch {}
+  }
+  // 해상도·방향을 바꾸면 감시 중에도 바로 카메라를 다시 연다
+  ['camRes', 'camOrient'].forEach(id => $(id).addEventListener('change', () => {
+    readSettings();
+    if (running) openCamera().catch(e => log('카메라 다시 열기 실패: ' + e.message, true)); else applyOrientation();
+  }));
+  // 녹화 화질: 해상도에 맞춰 비트레이트를 올림 (4K도 1분 영상이 텔레그램 50MB 제한 안에 들도록 상한)
+  function recBitrate() {
+    const px = (video.videoWidth || 640) * (video.videoHeight || 480);
+    return px <= 400_000 ? 900_000 : px <= 1_000_000 ? 1_800_000 : px <= 2_200_000 ? 3_000_000 : px <= 3_800_000 ? 4_500_000 : 5_500_000;
   }
 
   // ---- 카메라 줌 (폰 카메라 자체의 줌: 화질 그대로 확대, 감지·녹화도 확대된 화면 기준) ----
@@ -678,7 +711,7 @@ async function startCamera() {
     if (!window.MediaRecorder) return null;
     const chunks = [];
     const MIME = pickMime(hasAudio());
-    const rec = new MediaRecorder(stream, MIME ? { mimeType: MIME, videoBitsPerSecond: 900_000, audioBitsPerSecond: 64_000 } : undefined);
+    const rec = new MediaRecorder(stream, MIME ? { mimeType: MIME, videoBitsPerSecond: recBitrate(), audioBitsPerSecond: 64_000 } : undefined);
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     const done = new Promise(r => rec.onstop = () => r(new Blob(chunks, { type: rec.mimeType || MIME || 'video/webm' })));
     rec.start(1000);
@@ -873,7 +906,7 @@ async function startCamera() {
     let bat = '';
     try { const b = await batteryInfo(); if (b) bat = `\n배터리: ${batteryText(b)}`; } catch {}
     const g = Date.now() < graceUntil ? `\n본인 무시 중: ${fmtTime(graceUntil)}까지` : '';
-    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n실시간 시청: ${live.calls.size}/${live.MAX}명${zoomCaps() ? `\n카메라 줌: x${(zoomCaps().value || 1).toFixed(1)}` : ''}\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
+    return `📷 상태: ${armed ? '감시 중' : '일시정지'}${g}${ev ? '\n지금 사람이 보이는 중' : ''}${bat}\n소리 녹음: ${hasAudio() ? '켜짐' : '꺼짐'}\n카메라: ${video.videoWidth}×${video.videoHeight}\n실시간 시청: ${live.calls.size}/${live.MAX}명${zoomCaps() ? `\n카메라 줌: x${(zoomCaps().value || 1).toFixed(1)}` : ''}\n등록된 사람: ${people.map(p => p.name).join(', ') || '없음'}`;
   }
 
   // ---- 실시간 보기 (PeerJS / WebRTC) ----
@@ -1109,7 +1142,7 @@ async function startCamera() {
   function drawOverlay() {
     // 휴대폰을 돌려서 영상 가로·세로가 바뀌면 표시용 캔버스도 맞춘다
     if (video.videoWidth && (overlay.width !== video.videoWidth || overlay.height !== video.videoHeight)) {
-      overlay.width = video.videoWidth; overlay.height = video.videoHeight; prevGray = null;
+      overlay.width = video.videoWidth; overlay.height = video.videoHeight; prevGray = null; fitStage();
     }
     octx.clearRect(0, 0, overlay.width, overlay.height);
     octx.lineWidth = 3; octx.font = '18px sans-serif';
