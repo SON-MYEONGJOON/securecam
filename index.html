@@ -142,6 +142,13 @@
 <!-- ============ 뷰어 모드 ============ -->
 <main id="viewer" class="hidden">
   <h1>📡 보안캠 실시간 보기 <span id="vBadge" class="badge">연결 중</span></h1>
+  <div id="vBrowserWarn" class="card hidden" style="border:1px solid var(--warn); margin-bottom:10px">
+    <b>⚠️ 삼성 인터넷에서는 실시간 보기가 잘 안 됩니다.</b>
+    <div class="hint" style="margin:6px 0 10px">삼성 인터넷은 같은 와이파이 안에서도 직접 연결을 못 하고 중계 서버로만 연결해서, 연결이 안 되거나 중계 용량을 많이 씁니다.
+      아래 [주소 복사]를 누른 뒤 <b>Chrome</b>이나 <b>웨일</b>에 붙여넣어 여세요.<br>
+      매번 이렇게 하지 않으려면: 폰 설정 → 애플리케이션 → 기본 앱 선택 → 브라우저 앱 → Chrome(또는 웨일)</div>
+    <div class="row"><button id="vCopyLink" class="primary">주소 복사</button><button id="vWarnClose">이대로 보기</button></div>
+  </div>
   <div id="vWrap" style="position:relative; overflow:hidden; border-radius:12px; touch-action:pan-y">
     <video id="vVideo" playsinline autoplay muted controls style="display:block; transform-origin:center center"></video>
   </div>
@@ -216,8 +223,19 @@ function startViewer(camId, key, turn) {
   window.addEventListener('pagehide', () => { try { peer && peer.destroy(); } catch {} });
   const setBadge = (t, cls) => { badge.textContent = t; badge.className = 'badge ' + (cls || ''); };
   const inApp = /Telegram|KAKAOTALK|; wv\)/i.test(navigator.userAgent);
+  // 삼성 인터넷: WebRTC 내부 IP를 숨겨 같은 와이파이에서도 직접 연결이 안 됨(중계 서버로만 연결) → Chrome/웨일 안내
+  const samsung = /SamsungBrowser/i.test(navigator.userAgent);
+  if (samsung) {
+    $('vBrowserWarn').classList.remove('hidden');
+    $('vWarnClose').onclick = () => $('vBrowserWarn').classList.add('hidden');
+    $('vCopyLink').onclick = async () => {
+      try { await navigator.clipboard.writeText(location.href); $('vCopyLink').textContent = '✅ 복사됨 · Chrome/웨일에 붙여넣으세요'; }
+      catch { prompt('이 주소를 길게 눌러 복사한 뒤 Chrome/웨일에 붙여넣으세요', location.href); }
+    };
+  }
   const failHint = (why) => {
     hint.innerHTML = `<b>${why}</b><br>` +
+      (samsung ? '· <b>삼성 인터넷</b>으로 열려 있습니다. 위의 [주소 복사]를 눌러 <b>Chrome이나 웨일</b>에서 열면 대부분 해결됩니다.<br>' : '') +
       (inApp ? '· 지금 텔레그램/앱 안의 브라우저입니다. 오른쪽 위 ⋮ → <b>Chrome(브라우저)에서 열기</b>로 다시 열어 보세요.<br>' : '') +
       (turn && turn.u ? '· TURN 서버가 설정되어 있는데도 실패했다면 TURN 주소·사용자명·비밀번호를 확인하세요.<br>'
                       : '· 두 폰 사이의 직접(P2P) 연결이 막혀 있습니다. 모바일 데이터망이나, 같은 와이파이라도 공유기의 <b>AP 격리(클라이언트 격리)</b>·게스트 와이파이·메시 공유기에서 자주 생깁니다.<br>· 해결: 카메라 폰의 <b>실시간 보기 → TURN 서버</b>를 설정한 뒤 /live 로 새 링크를 받으세요.<br>') +
