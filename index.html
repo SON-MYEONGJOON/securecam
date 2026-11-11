@@ -148,6 +148,7 @@
     <button id="vSound" class="hidden">🔊 소리 켜기</button>
     <button id="vTalk" class="hidden">🎙️ 통화하기</button>
   </div>
+  <div id="vLevel" class="hint hidden" style="font-family:monospace"></div>
   <div class="hint" id="vHint">카메라 휴대폰과 P2P(WebRTC)로 연결합니다. 일부 모바일 데이터망에서는 연결이 안 될 수 있습니다. 그럴 땐 텔레그램에서 /watch, /snap, /clip 을 사용하세요.</div>
 </main>
 
@@ -269,8 +270,29 @@ function startViewer(camId, key, turn) {
     video.muted = !video.muted; video.play().catch(() => {});
     $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
   };
+  // 통화 중 소리 레벨 표시: 감시폰 소리가 도착하는데 안 들리는지(스피커/볼륨 문제), 아예 안 오는지 구분
+  const meter = { ctx: null, timer: null };
+  function startMeter() {
+    stopMeter();
+    try {
+      const ctx = meter.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const mk = (s) => { if (!s || !s.getAudioTracks().length) return null; const an = ctx.createAnalyser(); an.fftSize = 512; ctx.createMediaStreamSource(s).connect(an); return an; };
+      const camAn = mk(video.srcObject), micAn = mk(talk.mic), buf = new Float32Array(512);
+      const lv = (an) => { if (!an) return -1; an.getFloatTimeDomainData(buf); let m = 0; for (const x of buf) m = Math.max(m, Math.abs(x)); return m; };
+      const bar = (v) => v < 0 ? '없음' : ('▮'.repeat(Math.min(10, Math.round(v * 20))) || '·').padEnd(10, '·');
+      let camMax = 0;
+      meter.timer = setInterval(() => {
+        const c = lv(camAn), m = lv(micAn); camMax = Math.max(camMax * 0.9, c);
+        $('vLevel').textContent = `감시폰 소리 ${bar(c)}   내 마이크 ${bar(m)}` +
+          (c < 0 ? '\n→ 감시폰 소리가 오지 않습니다 (/sound on 확인)' : camMax > 0.02 ? '\n→ 감시폰 소리가 도착하고 있습니다. 안 들리면 볼륨 키를 올리거나 폰을 귀에 대 보세요.' : '');
+      }, 200);
+      $('vLevel').style.whiteSpace = 'pre-line'; $('vLevel').classList.remove('hidden');
+    } catch (e) { $('vLevel').textContent = '소리 레벨 표시 실패: ' + e.message; $('vLevel').classList.remove('hidden'); }
+  }
+  function stopMeter() { clearInterval(meter.timer); meter.timer = null; if (meter.ctx) { meter.ctx.close().catch(() => {}); meter.ctx = null; } $('vLevel').classList.add('hidden'); }
   function setTalk(on) {
     talk.on = on;
+    if (on) startMeter(); else stopMeter();
     if (talk.mic) talk.mic.getAudioTracks().forEach(t => t.enabled = on);
     // 동시 통화: 통화하는 동안은 감시폰 소리도 켜서 서로 동시에 말하고 들을 수 있게 (양쪽 마이크 모두 에코 제거 사용)
     if (on) { talk.prevMuted = video.muted; video.muted = false; video.play().catch(() => {}); }
