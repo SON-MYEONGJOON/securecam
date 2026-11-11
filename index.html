@@ -146,7 +146,7 @@
     <button id="vReconnect">다시 연결</button>
     <button id="vSnap">사진 저장</button>
     <button id="vSound" class="hidden">🔊 소리 켜기</button>
-    <button id="vTalk" class="hidden">🎙️ 말하기</button>
+    <button id="vTalk" class="hidden">🎙️ 통화하기</button>
   </div>
   <div class="hint" id="vHint">카메라 휴대폰과 P2P(WebRTC)로 연결합니다. 일부 모바일 데이터망에서는 연결이 안 될 수 있습니다. 그럴 땐 텔레그램에서 /watch, /snap, /clip 을 사용하세요.</div>
 </main>
@@ -272,14 +272,16 @@ function startViewer(camId, key, turn) {
   function setTalk(on) {
     talk.on = on;
     if (talk.mic) talk.mic.getAudioTracks().forEach(t => t.enabled = on);
-    if (on) { talk.prevMuted = video.muted; video.muted = true; }        // 내 목소리가 되돌아와 울리지 않게
+    // 동시 통화: 통화하는 동안은 감시폰 소리도 켜서 서로 동시에 말하고 들을 수 있게 (양쪽 마이크 모두 에코 제거 사용)
+    if (on) { talk.prevMuted = video.muted; video.muted = false; video.play().catch(() => {}); }
     else { video.muted = talk.prevMuted; video.play().catch(() => {}); }
     try { curConn && curConn.open && curConn.send({ type: 'talk', on }); } catch {}
-    const b = $('vTalk'); b.textContent = on ? '🔴 말하는 중 · 누르면 끝' : '🎙️ 말하기'; b.classList.toggle('danger', on);
+    const b = $('vTalk'); b.textContent = on ? '🔴 통화 중 · 누르면 끝' : '🎙️ 통화하기'; b.classList.toggle('danger', on);
     $('vSound').textContent = video.muted ? '🔊 소리 켜기' : '🔇 소리 끄기';
-    if (on) hint.textContent = '말하는 중입니다. 감시폰 스피커로 내 목소리가 나갑니다. 대답을 들으려면 [말하는 중]을 눌러 끄세요. (말하는 동안은 울림 방지를 위해 감시폰 소리가 꺼집니다)';
-    else hint.textContent = (video.srcObject && video.srcObject.getAudioTracks().length) ? baseHint
-      : '감시폰의 소리 녹음이 꺼져 있어 대답은 들리지 않습니다. 텔레그램에서 /sound on 을 보내면 들립니다.';
+    const camAudio = !!(video.srcObject && video.srcObject.getAudioTracks().length);
+    if (on) hint.textContent = camAudio ? '통화 중입니다. 서로 동시에 말하고 들을 수 있습니다. 울리면 이어폰을 쓰거나 볼륨을 조금 낮추세요.'
+                                        : '내 목소리는 감시폰 스피커로 나갑니다. 감시폰의 소리 녹음이 꺼져 있어 대답은 들리지 않습니다 (텔레그램에서 /sound on).';
+    else hint.textContent = baseHint;
   }
   $('vTalk').onclick = async () => {
     if (talk.on) return setTalk(false);
@@ -413,7 +415,8 @@ async function startCamera() {
   const hasAudio = () => !!(stream && stream.getAudioTracks().some(t => t.readyState === 'live'));
   async function attachAudio() {
     if (!stream || hasAudio()) return;
-    const a = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true }, video: false });
+    // 에코 제거 켬: 실시간 보기에서 동시 통화할 때 스피커로 나온 상대 목소리가 다시 마이크로 들어가 되돌아가지 않게
+    const a = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
     a.getAudioTracks().forEach(t => stream.addTrack(t));
   }
   function detachAudio() {
@@ -729,7 +732,7 @@ async function startCamera() {
         conn.on('data', (d) => {
           if (!d) return;
           if (d.type === 'ping') { if (call) call.lastPing = Date.now(); return; }
-          if (d.type === 'talk') { if (call) { call.talking = !!d.on; log(`🎙️ ${call.who} ${d.on ? '말하기 시작' : '말하기 끝'}`); this.talkUi(); } return; }
+          if (d.type === 'talk') { if (call) { call.talking = !!d.on; log(`🎙️ ${call.who} ${d.on ? '통화 시작' : '통화 끝'}`); this.talkUi(); } return; }
           if (d.type !== 'hello' || call) return;
           if (d.k !== this.key) { conn.send({ type: 'denied' }); setTimeout(() => conn.close(), 500); log('실시간 보기: 잘못된 키로 접속 시도'); return; }
           // 같은 시청 화면이 다시 접속하면 예전 연결은 정리
@@ -775,7 +778,7 @@ async function startCamera() {
     talkUi() { // 감시폰 화면에 누가 말하는 중인지 표시
       const who = [...this.calls].filter(c => c.talking).map(c => c.who);
       const el = $('talkBanner'); if (!el) return;
-      el.textContent = who.length ? `🔊 ${who.join(', ')} 말하는 중` : ''; el.style.display = who.length ? 'block' : 'none';
+      el.textContent = who.length ? `🔊 ${who.join(', ')} 통화 중` : ''; el.style.display = who.length ? 'block' : 'none';
     },
     endCall(c, why) {
       if (c.talk) { try { c.talk.close(); } catch {} }
