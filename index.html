@@ -118,7 +118,7 @@
     </div>
     <div class="row">
       <div><label>얼굴 일치 기준 (0.3~0.9)</label><input id="matchThr" type="number" step="0.01" min="0.3" max="0.9" value="0.55"></div>
-      <div><label>사람 감지 민감도 (0.2~0.8)</label><input id="personThr" type="number" step="0.05" min="0.2" max="0.8" value="0.45"></div>
+      <div><label>사람 감지 민감도 (0.2~0.8)</label><input id="personThr" type="number" step="0.05" min="0.2" max="0.8" value="0.4"></div>
     </div>
     <div class="row">
       <div><label>최대 녹화 길이 (초)</label><input id="maxClip" type="number" min="10" max="300" value="90"></div>
@@ -454,6 +454,8 @@ async function startCamera() {
   // ---- 설정 ----
   const FIELDS = ['tgToken','tgChat','camFacing','camRes','camOrient','aiDelegate','ownerMode','graceMin','endSec','matchThr','personThr','maxClip','minEvent','instantAlert','audioOn','echoCancel','turnUrl','turnUser','turnPass'];
   const saved = store.get('settings', {});
+  // 사람 감지 기본 민감도를 0.45 → 0.40으로 바꿈: 예전 기본값 그대로 쓰던 경우 한 번만 새 기본값으로 옮김
+  if (!store.get('mig.personThr40', false)) { if (Number(saved.personThr) === 0.45) saved.personThr = 0.4; store.set('mig.personThr40', true); }
   for (const f of FIELDS) {
     const el = $(f); if (saved[f] === undefined) continue;
     if (el.type === 'checkbox') el.checked = !!saved[f]; else el.value = saved[f];
@@ -1111,7 +1113,10 @@ async function startCamera() {
     const pr = personDet.detectForVideo(video, mpTs);
     const all = pr.detections
       .map(d => ({ score: d.categories[0].score, box: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height] }));
-    const persons = all.filter(p => p.score >= S.personThr);
+    // 사람이 이미 등장한 뒤에는 기준을 낮춰 유지 (앉거나 몸이 일부 가려져도 이벤트가 끊기지 않게).
+    // 처음 등장 판단은 원래 기준 그대로라 잘못 잡는 경우는 늘지 않음.
+    const thr = ev ? Math.max(0.2, S.personThr - 0.15) : S.personThr;
+    const persons = all.filter(p => p.score >= thr);
     // 놓칠 뻔한 경우 기록: 움직임이 있는데 사람 점수가 기준보다 조금 낮아 무시한 경우 (1분에 한 번)
     if (!persons.length && !ev && curMotion > 0.02 && all.length) {
       const best = Math.max(...all.map(p => p.score));
