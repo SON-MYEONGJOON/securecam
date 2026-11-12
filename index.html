@@ -1049,17 +1049,23 @@ async function startCamera() {
 
   // ---- 메인 루프 ----
   let lastDetect = 0, detectBusy = false, frameCount = 0, fpsT = performance.now(), fps = 0;
+  let detectSeq = 0, lastLoopAt = 0, curMotion = 0;
+  const stall = { times: [] };
   async function loop() {
     if (!running) return;
-    const now = Date.now();
+    const now = Date.now(); lastLoopAt = now;
     try {
-      const motion = motionScore();
+      const motion = curMotion = motionScore();
       const interval = ev || enrolling ? 250 : (motion > 0.01 ? 300 : 2500); // 움직임 없으면 2.5초마다만 확인
+      // 분석 멈춤 감시: AI 분석 한 번이 30초 넘게 끝나지 않으면 멈춘 것으로 보고 복구
+      if (detectBusy && now - lastDetect > 30_000) onStall(now);
       if (!detectBusy && now - lastDetect >= interval) {
         detectBusy = true; lastDetect = now;
-        await detect(now);
-        detectBusy = false;
-        frameCount++;
+        const seq = ++detectSeq;
+        // 분석을 기다리지 않고 루프는 계속 돈다 → 분석이 멈춰도 위의 멈춤 감시가 동작
+        detect(now, seq).then(
+          () => { if (seq === detectSeq) { detectBusy = false; frameCount++; } }, // 멈춤 처리 후 늦게 끝난 분석은 무시
+          (e) => { if (seq === detectSeq) detectBusy = false; console.error(e); logError(e); });
       }
       const pn = performance.now();
       if (pn - fpsT > 3000) { fps = frameCount / ((pn - fpsT) / 1000); frameCount = 0; fpsT = pn; }
@@ -1071,21 +1077,51 @@ async function startCamera() {
         [`움직임 ${(motion * 100).toFixed(0)}%`],
         ...(live.calls.size ? [[`시청 ${live.calls.size}`, 'ok']] : []),
       ]);
-    } catch (e) { detectBusy = false; console.error(e); }
+    } catch (e) { detectBusy = false; console.error(e); logError(e); }
     setTimeout(loop, 120);
   }
+  // 분석 중 오류는 1분에 한 번만 로그에 남긴다 (같은 오류가 계속 나면 로그가 넘치지 않게)
+  let lastErrLog = 0;
+  function logError(e) { const t = Date.now(); if (t - lastErrLog > 60_000) { lastErrLog = t; log('분석 오류: ' + (e && e.message || e)); } }
+  function onStall(now) {
+    detectSeq++; detectBusy = false; ev && (ev.lastSeen = now);
+    stall.times = stall.times.filter(t => now - t < 10 * 60_000); stall.times.push(now);
+    const inApp = !!window.SecureCamNative;
+    if (stall.times.length >= 2 && inApp) { // 10분 안에 두 번 멈추면 앱에서는 페이지를 새로 불러와 감시를 자동 재시작
+      log('⚠️ AI 분석이 반복해서 멈춤 → 앱 새로고침으로 감시 재시작', true);
+      tgText('⚠️ 보안캠 AI 분석이 멈춰서 감시를 자동으로 다시 시작합니다.');
+      store.set('logs', logs); setTimeout(() => location.reload(), 3000);
+    } else {
+      log('⚠️ AI 분석이 30초 넘게 멈춤 → 복구 시도', true);
+      if (stall.times.length >= 2) tgText('⚠️ 보안캠 AI 분석이 반복해서 멈춥니다. 감시폰에서 [감시 중지] 후 새로고침하고 다시 시작해 주세요.');
+    }
+  }
+  // 반복 확인(1분마다): 메인 루프 자체가 끊겼으면 다시 돌린다
+  setInterval(() => {
+    if (running && Date.now() - lastLoopAt > 30_000) { log('⚠️ 감시 루프 끊김 → 다시 시작', true); loop(); }
+  }, 60_000);
+  // 정기 상태 기록 (1시간마다): 나중에 '그 시간에 분석이 돌고 있었나'를 확인할 수 있게
+  setInterval(() => {
+    if (running) log(`감시 중 · 분석 ${fps.toFixed(1)}/s · 카메라 ${video.videoWidth}×${video.videoHeight}${armed ? '' : ' · 일시정지'}${document.visibilityState === 'hidden' ? ' · 화면 숨겨짐!' : ''}`);
+  }, 60 * 60_000);
 
-  let lastPersons = [], mpTs = 0;
-  async function detect(now) {
+  let lastPersons = [], mpTs = 0, lastNearMiss = 0;
+  async function detect(now, seq) {
     mpTs = Math.max(mpTs + 1, performance.now());
     const pr = personDet.detectForVideo(video, mpTs);
-    const persons = pr.detections
-      .map(d => ({ score: d.categories[0].score, box: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height] }))
-      .filter(p => p.score >= S.personThr);
+    const all = pr.detections
+      .map(d => ({ score: d.categories[0].score, box: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height] }));
+    const persons = all.filter(p => p.score >= S.personThr);
+    // 놓칠 뻔한 경우 기록: 움직임이 있는데 사람 점수가 기준보다 조금 낮아 무시한 경우 (1분에 한 번)
+    if (!persons.length && !ev && curMotion > 0.02 && all.length) {
+      const best = Math.max(...all.map(p => p.score));
+      if (best >= 0.25 && now - lastNearMiss > 60_000) { lastNearMiss = now; log(`움직임 감지 · 사람 점수 ${best.toFixed(2)} (기준 ${S.personThr}) → 사람 아님으로 판단`); }
+    }
     // 얼굴 인식은 사람이 보일 때(또는 등록 중)만 실행해서 배터리를 아낀다
     let faces = [];
     if (persons.length || enrolling || ev) {
       const res = await human.detect(video);
+      if (seq !== detectSeq) return; // 멈춤으로 처리된 뒤 늦게 끝난 분석
       faces = (res.face || []).filter(f => (f.boxScore ?? f.score) >= 0.5);
     }
     lastPersons = persons;
