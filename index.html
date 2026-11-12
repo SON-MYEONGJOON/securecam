@@ -533,11 +533,36 @@ async function startCamera() {
   }
 
   // ---- 카메라 ----
-  async function openCamera() {
-    if (stream) stream.getTracks().forEach(t => t.stop());
+  // ---- 카메라 초당 장수: 움직임이 없으면 5장으로 낮춰 발열을 줄이고, 움직임·사람·녹화·실시간 보기 때는 15장 ----
+  const camFps = { cur: 15, lastActive: Date.now(), boostUntil: 0, busy: false, lowMs: 0, lowSince: 0 };
+  function camSize() {
     let [w, h] = S.camRes.split('x').map(Number);
     if (S.camOrient === 'portrait') [w, h] = [Math.min(w, h), Math.max(w, h)]; // 세로: 세로가 긴 영상 요청
+    return [w, h];
+  }
+  // applyConstraints 는 기존 조건을 모두 바꾸므로 해상도·초당 장수·줌을 항상 함께 넘긴다
+  function camConstraints(zoom = camZoom.cur) {
+    const [w, h] = camSize();
+    const c = { width: { ideal: w }, height: { ideal: h }, frameRate: camFps.cur >= 15 ? { ideal: 15, max: 20 } : { ideal: camFps.cur, max: camFps.cur } };
+    if (zoom != null && zoomCaps()) c.advanced = [{ zoom }];
+    return c;
+  }
+  async function setCamFps(fps) {
+    const t = stream && stream.getVideoTracks()[0];
+    if (!t || camFps.cur === fps || camFps.busy) return;
+    const now = Date.now();
+    if (fps < 15) camFps.lowSince = now; else if (camFps.lowSince) { camFps.lowMs += now - camFps.lowSince; camFps.lowSince = 0; }
+    camFps.cur = fps; camFps.busy = true;
+    try { await t.applyConstraints(camConstraints()); } catch (e) { console.warn('frameRate', e); } finally { camFps.busy = false; }
+  }
+  const camBoost = (sec) => { camFps.boostUntil = Math.max(camFps.boostUntil, Date.now() + sec * 1000); setCamFps(15); };
+
+  async function openCamera() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    const [w, h] = camSize();
     applyOrientation();
+    if (camFps.lowSince) { camFps.lowMs += Date.now() - camFps.lowSince; camFps.lowSince = 0; }
+    camFps.cur = 15; camFps.lastActive = Date.now();
     stream = await navigator.mediaDevices.getUserMedia({
       audio: false,
       // zoom: true → 폰 카메라가 줌을 지원하면 실시간 보기에서 원격으로 확대/축소할 수 있게 (지원 안 하면 무시됨)
@@ -583,7 +608,7 @@ async function startCamera() {
   async function setCamZoom(v, who) {
     const c = zoomCaps(); if (!c) return null;
     v = Math.min(c.max, Math.max(c.min, Number(v) || c.min));
-    await stream.getVideoTracks()[0].applyConstraints({ advanced: [{ zoom: v }] });
+    await stream.getVideoTracks()[0].applyConstraints(camConstraints(v));
     camZoom.cur = v; store.set('zoom', v);
     if (who) {
       for (const k of live.calls) { try { k.conn.send({ type: 'zoomval', v }); } catch {} }
@@ -779,6 +804,7 @@ async function startCamera() {
     .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
   function startRecorder(maxSec) {
     if (!window.MediaRecorder) return null;
+    camBoost(maxSec + 2); // 녹화 중에는 초당 15장
     const chunks = [];
     const MIME = pickMime(hasAudio());
     const rec = new MediaRecorder(stream, MIME ? { mimeType: MIME, videoBitsPerSecond: recBitrate(), audioBitsPerSecond: 64_000 } : undefined);
@@ -1126,6 +1152,10 @@ async function startCamera() {
     const now = Date.now(); lastLoopAt = now;
     try {
       const motion = curMotion = motionScore();
+      // 30초 동안 움직임·사람·녹화·실시간 보기가 없으면 카메라를 초당 5장으로 (발열 줄이기), 생기면 바로 15장
+      if (motion > 0.01 || ev || enrolling || live.calls.size || now < camFps.boostUntil) camFps.lastActive = now;
+      const wantFps = now - camFps.lastActive > 30_000 ? 5 : 15;
+      if (wantFps !== camFps.cur) setCamFps(wantFps);
       const interval = ev || enrolling ? 250 : (motion > 0.01 ? 300 : 2500); // 움직임 없으면 2.5초마다만 확인
       // 분석 멈춤 감시: AI 분석 한 번이 30초 넘게 끝나지 않으면 멈춘 것으로 보고 복구
       if (detectBusy && now - lastDetect > 30_000) onStall(now);
@@ -1145,6 +1175,7 @@ async function startCamera() {
         [ev ? `사람 ${ev.maxPersons}명 · ${Math.round((now - ev.start) / 1000)}초` : '조용함', ev ? 'bad' : ''],
         [`분석 ${fps.toFixed(1)}/s`],
         [`움직임 ${(motion * 100).toFixed(0)}%`],
+        ...(camFps.cur < 15 ? [['절전(5fps)']] : []),
         ...(live.calls.size ? [[`시청 ${live.calls.size}`, 'ok']] : []),
       ]);
     } catch (e) { detectBusy = false; console.error(e); logError(e); }
@@ -1171,8 +1202,15 @@ async function startCamera() {
     if (running && Date.now() - lastLoopAt > 30_000) { log('⚠️ 감시 루프 끊김 → 다시 시작', true); loop(); }
   }, 60_000);
   // 정기 상태 기록 (1시간마다): 나중에 '그 시간에 분석이 돌고 있었나'를 확인할 수 있게
-  setInterval(() => {
-    if (running) log(`감시 중 · 분석 ${fps.toFixed(1)}/s · 카메라 ${video.videoWidth}×${video.videoHeight} · 밝기 ${camHealth.lum.toFixed(0)}${armed ? '' : ' · 일시정지'}${document.visibilityState === 'hidden' ? ' · 화면 숨겨짐!' : ''}`);
+  setInterval(async () => {
+    if (!running) return;
+    // 지난 1시간 중 카메라를 초당 5장으로 낮춰 둔 비율 (발열 줄이기가 얼마나 동작했는지)
+    const now = Date.now();
+    if (camFps.lowSince) { camFps.lowMs += now - camFps.lowSince; camFps.lowSince = now; }
+    const lowPct = Math.min(100, Math.round(camFps.lowMs / (60 * 60_000) * 100)); camFps.lowMs = 0;
+    const b = await batteryInfo().catch(() => null);
+    const bt = b ? ` · 배터리 ${b.level}%${b.temp != null ? ` · 온도 ${b.temp.toFixed(1)}°C` : ''}` : '';
+    log(`감시 중 · 분석 ${fps.toFixed(1)}/s · 카메라 ${video.videoWidth}×${video.videoHeight} (절전 ${lowPct}%) · 밝기 ${camHealth.lum.toFixed(0)}${bt}${armed ? '' : ' · 일시정지'}${document.visibilityState === 'hidden' ? ' · 화면 숨겨짐!' : ''}`);
   }, 60 * 60_000);
 
   let lastPersons = [], mpTs = 0, lastNearMiss = 0;
