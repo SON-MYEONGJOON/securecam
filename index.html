@@ -837,17 +837,44 @@ async function startCamera() {
       ? ['video/mp4;codecs=avc1,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp8,opus', 'video/webm']
       : ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp8', 'video/webm'])
     .find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
-  function startRecorder(maxSec) {
-    if (!window.MediaRecorder) return null;
-    camBoost(maxSec + 2); // 녹화 중에는 초당 15장
+  function makeRecorder() {
+    if (!window.MediaRecorder || !stream) return null;
     const chunks = [];
     const MIME = pickMime(hasAudio());
     const rec = new MediaRecorder(stream, MIME ? { mimeType: MIME, videoBitsPerSecond: recBitrate(), audioBitsPerSecond: 64_000 } : undefined);
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
     const done = new Promise(r => rec.onstop = () => r(new Blob(chunks, { type: rec.mimeType || MIME || 'video/webm' })));
     rec.start(1000);
+    return { rec, done, t0: Date.now(), stream };
+  }
+  // maxSec 뒤 자동으로 끝나게 감싼다
+  function wrapRecorder(r, maxSec) {
+    camBoost(maxSec + 2); // 녹화 중에는 초당 15장
+    const { rec, done } = r;
     const t = setTimeout(() => rec.state !== 'inactive' && rec.stop(), maxSec * 1000);
-    return { rec, done, stop() { clearTimeout(t); if (rec.state !== 'inactive') rec.stop(); return done; } };
+    return { rec, done, t0: r.t0, stop() { clearTimeout(t); if (rec.state !== 'inactive') rec.stop(); return done; } };
+  }
+  function startRecorder(maxSec) { const r = makeRecorder(); return r && wrapRecorder(r, maxSec); }
+
+  // ---- 등장 전부터 녹화 ----
+  // 사람 판정까지 1~2초 걸려서 녹화가 사람이 들어온 뒤부터 시작되던 문제 → 움직임이 있는 동안에만 녹화기를 3.5초 간격으로 겹쳐 돌려 두고
+  // (최대 2개, 7초 지나면 버림) 사람으로 판정되면 그중 가장 먼저 시작한 것을 그대로 이어서 사건 영상으로 쓴다 → 영상이 등장 3~7초 전부터 시작
+  const preRec = { list: [], lastMotion: 0 };
+  function dropPreRec(r) { r.rec.ondataavailable = null; try { if (r.rec.state !== 'inactive') r.rec.stop(); } catch {} }
+  function preRecTick(now, motion) {
+    if (motion > 0.01) preRec.lastMotion = now;
+    preRec.list = preRec.list.filter(r => {
+      if (r.stream === stream && now - r.t0 <= 7000 && r.rec.state === 'recording') return true;
+      dropPreRec(r); return false;
+    });
+    if (!running || camHealth.darkSince || now - preRec.lastMotion > 4000) { preRec.list.forEach(dropPreRec); preRec.list = []; return; }
+    const newest = preRec.list[preRec.list.length - 1];
+    if (!newest || now - newest.t0 >= 3500) { try { const r = makeRecorder(); if (r) preRec.list.push(r); } catch (e) { logError(e); } }
+  }
+  function adoptPreRec(now, maxSec) {
+    const pick = preRec.list.find(r => now - r.t0 >= 1000 && r.stream === stream && r.rec.state === 'recording');
+    preRec.list.forEach(r => r !== pick && dropPreRec(r)); preRec.list = [];
+    return pick ? wrapRecorder(pick, maxSec) : null;
   }
 
   // ---- 텔레그램 ----
@@ -1161,7 +1188,7 @@ async function startCamera() {
   async function beginEvent(now, persons) {
     ev = { start: now, lastSeen: now, maxPersons: persons.length, ownerHits: 0, ownerNames: new Set(), strangerHits: 0, noFaceFrames: 0,
            bestSnap: null, bestScore: -1, lastSnapAt: 0, instantSent: false,
-           rec: startRecorder(S.maxClip), preSnap: null };
+           rec: adoptPreRec(now, S.maxClip) || startRecorder(S.maxClip), preSnap: null };
     log(`사람 등장 (${persons.length}명)`, true);
     const e = ev; takePreRollSnap(now).then(p => { e.preSnap = p; }).catch(() => {});
   }
@@ -1187,7 +1214,8 @@ async function startCamera() {
     log(`사람 사라짐 · 알림 전송 (${Math.round(dur)}초, ${face})`, true);
     if (e.bestSnap) tgPhoto(e.bestSnap, caption); else tgText(caption);
     if (e.preSnap) tgPhoto(e.preSnap.blob, `👣 등장 순간 · ${fmtTime(e.preSnap.t)} (사람 판정 ${((e.start - e.preSnap.t) / 1000).toFixed(1)}초 전 화면)`);
-    if (clip && clip.size > 1000) tgVideo(clip, `🎥 ${fmtTime(e.start)} 녹화 영상${dur > S.maxClip ? ` (앞 ${S.maxClip}초)` : ''}`);
+    const pre = e.rec ? Math.max(0, Math.round((e.start - e.rec.t0) / 1000)) : 0;
+    if (clip && clip.size > 1000) tgVideo(clip, `🎥 ${fmtTime(e.rec.t0 || e.start)} 녹화 영상${pre >= 1 ? ` (사람 판정 ${pre}초 전부터)` : ''}${dur > S.maxClip ? ` (판정 후 ${S.maxClip}초까지)` : ''}`);
   }
 
   // ---- 메인 루프 ----
@@ -1199,7 +1227,7 @@ async function startCamera() {
     const now = Date.now(); lastLoopAt = now;
     try {
       const motion = curMotion = motionScore();
-      if (!ev) preRollTick(now, motion);
+      if (!ev) { preRollTick(now, motion); preRecTick(now, motion); }
       // 30초 동안 움직임·사람·녹화·실시간 보기가 없으면 카메라를 초당 5장으로 (발열 줄이기), 생기면 바로 15장
       if (motion > 0.01 || ev || enrolling || live.calls.size || now < camFps.boostUntil) camFps.lastActive = now;
       const wantFps = now - camFps.lastActive > 30_000 ? 5 : 15;
@@ -1419,6 +1447,7 @@ async function startCamera() {
   function stopAll(silent) {
     running = false; armed = false;
     if (ev && ev.rec) ev.rec.stop(); ev = null; recentPerson = [];
+    preRec.list.forEach(dropPreRec); preRec.list = [];
     live.stop();
     if (stream) stream.getTracks().forEach(t => t.stop()); stream = null;
     try { wakeLock && wakeLock.release(); } catch {}
