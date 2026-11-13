@@ -858,7 +858,7 @@ async function startCamera() {
 
   // ---- 등장 전부터 녹화 ----
   // 사람 판정까지 1~2초 걸려서 녹화가 사람이 들어온 뒤부터 시작되던 문제 → 움직임이 있는 동안에만 녹화기를 3.5초 간격으로 겹쳐 돌려 두고
-  // (최대 2개, 7초 지나면 버림) 사람으로 판정되면 그중 가장 먼저 시작한 것을 그대로 이어서 사건 영상으로 쓴다 → 영상이 등장 3~7초 전부터 시작
+  // (최대 2개, 7초 지나면 버림) 사람으로 판정되면 그중 가장 먼저 시작한 것을 그대로 이어서 사건 영상으로 쓴다 → 영상이 움직임이 처음 생긴 순간(최대 7초 전)부터 시작
   const preRec = { list: [], lastMotion: 0 };
   function dropPreRec(r) { r.rec.ondataavailable = null; try { if (r.rec.state !== 'inactive') r.rec.stop(); } catch {} }
   function preRecTick(now, motion) {
@@ -872,7 +872,7 @@ async function startCamera() {
     if (!newest || now - newest.t0 >= 3500) { try { const r = makeRecorder(); if (r) preRec.list.push(r); } catch (e) { logError(e); } }
   }
   function adoptPreRec(now, maxSec) {
-    const pick = preRec.list.find(r => now - r.t0 >= 1000 && r.stream === stream && r.rec.state === 'recording');
+    const pick = preRec.list.find(r => r.stream === stream && r.rec.state === 'recording'); // 가장 먼저 시작한 것 (막 시작했어도 새로 여는 것보다 이름)
     preRec.list.forEach(r => r !== pick && dropPreRec(r)); preRec.list = [];
     return pick ? wrapRecorder(pick, maxSec) : null;
   }
