@@ -557,7 +557,13 @@ async function startCamera() {
   }
   const camBoost = (sec) => { camFps.boostUntil = Math.max(camFps.boostUntil, Date.now() + sec * 1000); setCamFps(15); };
 
-  async function openCamera() {
+  // 카메라 열기가 동시에 두 번 돌면(검은 화면 복구 + 끊김 복구 등) play()가 서로 끊겨 실패한다 → 진행 중이면 그 작업을 같이 기다림
+  let camOpening = null;
+  function openCamera() {
+    if (!camOpening) camOpening = openCameraNow().finally(() => { camOpening = null; });
+    return camOpening;
+  }
+  async function openCameraNow() {
     if (stream) stream.getTracks().forEach(t => t.stop());
     const [w, h] = camSize();
     applyOrientation();
@@ -987,7 +993,7 @@ async function startCamera() {
       cur += (cur ? '\n' : '') + l;
     }
     chunks.push(cur);
-    chunks.forEach(c => tgText(c));
+    chunks.forEach(c => tgSend('sendMessage', { text: c, disable_web_page_preview: true }));
   }
   // ---- 배터리·온도 ----
   // 안드로이드 앱 안에서는 앱이 주는 정보(온도, 꽂혀 있는데 충전 안 됨)를 쓰고, Chrome에서는 브라우저 배터리 API만 쓴다
@@ -1004,7 +1010,7 @@ async function startCamera() {
     catch { return null; }
   }
   function batteryText(b) {
-    const st = b.charging ? (b.full ? '완충' : '충전 중') : !b.native ? '충전 안 함!' : b.plugged ? '꽂혀 있는데 충전 안 됨!' : '충전기 빠짐!';
+    const st = b.charging ? (b.full ? '완충' : '충전 중') : !b.native ? '충전 안 함!' : b.plugged ? (b.level >= 75 ? '충전기 연결됨 · 충전 쉬는 중' : '꽂혀 있는데 충전 안 됨!') : '충전기 빠짐!';
     return `${b.level}% (${st})${b.temp != null ? ` · 온도 ${b.temp.toFixed(1)}°C${b.temp >= HOT_C || b.overheat ? ' 🔥' : ''}` : ''}`;
   }
   const pw = { hot: false, stopSince: 0, stopLevel: 0, stopWarned: false, lowWarned: false };
@@ -1432,7 +1438,7 @@ async function startCamera() {
   setInterval(async () => {
     if (!running) return;
     // 카메라 끊김 복구
-    if (stream && stream.getVideoTracks()[0].readyState === 'ended') { log('카메라 끊김 → 재연결'); openCamera().catch(e => log('카메라 재연결 실패: ' + e.message)); }
+    if (!camOpening && !camHealth.fixing && stream && stream.getVideoTracks()[0].readyState === 'ended') { log('카메라 끊김 → 재연결'); openCamera().catch(e => log('카메라 재연결 실패: ' + e.message)); }
   }, 60_000);
 
   setInterval(setArmBadge, 30_000);
