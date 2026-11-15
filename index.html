@@ -660,6 +660,25 @@ async function startCamera() {
   }
 
   // ---- AI 모델 ----
+  // 사람 감지기 만들기 (오류가 반복되면 새로 만들어 복구할 때도 사용)
+  let mpMod = null, mpFileset = null;
+  async function createPersonDet() {
+    mpMod = mpMod || await import(MP_URL + '/vision_bundle.mjs');
+    mpFileset = mpFileset || await mpMod.FilesetResolver.forVisionTasks(MP_URL + '/wasm');
+    return mpMod.ObjectDetector.createFromOptions(mpFileset, {
+      baseOptions: { modelAssetPath: MP_MODEL, delegate: S.aiDelegate || 'CPU' },
+      runningMode: 'VIDEO', scoreThreshold: 0.2, categoryAllowlist: ['person'], maxResults: 6,
+    });
+  }
+  const mpErr = { n: 0, rebuilding: false };
+  async function rebuildPersonDet(why) {
+    if (mpErr.rebuilding) return; mpErr.rebuilding = true;
+    log(`⚠️ 사람 감지 오류가 반복됨 (${why}) → 감지기 다시 만들기`, true);
+    try { const old = personDet; personDet = await createPersonDet(); mpTs = 0; mpErr.n = 0; try { old && old.close(); } catch {} log('사람 감지기 복구 완료'); }
+    catch (e) { log('사람 감지기 다시 만들기 실패: ' + shortErr(e), true); }
+    finally { mpErr.rebuilding = false; }
+  }
+  const shortErr = (e) => String(e && e.message || e).split(String.fromCharCode(10))[0].replace(/^Encountered multiple errors:\s*/, '').slice(0, 160);
   async function loadModels() {
     if (human) return;
     $('loadHint').textContent = 'AI 모델 불러오는 중… (처음 한 번은 1~2분 걸릴 수 있음)';
@@ -683,12 +702,7 @@ async function startCamera() {
     await human.load();
     await human.warmup();
     // 사람(몸 전체) 감지: MediaPipe EfficientDet
-    const mp = await import(MP_URL + '/vision_bundle.mjs');
-    const fileset = await mp.FilesetResolver.forVisionTasks(MP_URL + '/wasm');
-    personDet = await mp.ObjectDetector.createFromOptions(fileset, {
-      baseOptions: { modelAssetPath: MP_MODEL, delegate: S.aiDelegate || 'CPU' },
-      runningMode: 'VIDEO', scoreThreshold: 0.2, categoryAllowlist: ['person'], maxResults: 6,
-    });
+    personDet = await createPersonDet();
     $('loadHint').textContent = `AI 준비 완료 (백엔드: ${human.tf?.getBackend?.() || '?'})`;
     log('AI 모델 준비 완료');
   }
@@ -1265,7 +1279,7 @@ async function startCamera() {
   }
   // 분석 중 오류는 1분에 한 번만 로그에 남긴다 (같은 오류가 계속 나면 로그가 넘치지 않게)
   let lastErrLog = 0;
-  function logError(e) { const t = Date.now(); if (t - lastErrLog > 60_000) { lastErrLog = t; log('분석 오류: ' + (e && e.message || e)); } }
+  function logError(e) { const t = Date.now(); if (t - lastErrLog > 60_000) { lastErrLog = t; log('분석 오류: ' + shortErr(e)); } }
   function onStall(now) {
     detectSeq++; detectBusy = false; ev && (ev.lastSeen = now);
     stall.times = stall.times.filter(t => now - t < 10 * 60_000); stall.times.push(now);
@@ -1297,8 +1311,12 @@ async function startCamera() {
 
   let lastPersons = [], mpTs = 0, lastNearMiss = 0;
   async function detect(now, seq) {
+    // 카메라를 다시 여는 중 등 화면이 아직 없을 때 분석하면 MediaPipe가 'ROI width and height must be > 0' 오류를 낸다 → 건너뜀
+    if (!video.videoWidth || !video.videoHeight || video.readyState < 2 || mpErr.rebuilding) return;
     mpTs = Math.max(mpTs + 1, performance.now());
-    const pr = personDet.detectForVideo(video, mpTs);
+    let pr;
+    try { pr = personDet.detectForVideo(video, mpTs); mpErr.n = 0; }
+    catch (e) { if (++mpErr.n >= 3) rebuildPersonDet(shortErr(e)); throw e; } // 한 번 망가지면 계속 실패하므로 3번 연속이면 새로 만듦
     const all = pr.detections
       .map(d => ({ score: d.categories[0].score, box: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height] }));
     // 사람이 이미 등장한 뒤에는 기준을 낮춰 유지 (앉거나 몸이 일부 가려져도 이벤트가 끊기지 않게).
