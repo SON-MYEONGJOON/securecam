@@ -1293,6 +1293,16 @@ async function startCamera() {
       if (stall.times.length >= 2) tgText('⚠️ 보안캠 AI 분석이 반복해서 멈춥니다. 감시폰에서 [감시 중지] 후 새로고침하고 다시 시작해 주세요.');
     }
   }
+  // 앱(안드로이드)에 30초마다 '살아 있음' 신호: 3분 넘게 끊기면 앱이 텔레그램으로 알리고 감시 화면을 다시 띄운다
+  // (메인 루프가 1분 넘게 멈춰 있으면 신호를 보내지 않음 → 앱이 다시 띄움)
+  function nativeHeartbeat() {
+    try {
+      if (!window.SecureCamNative || !SecureCamNative.heartbeat) return;
+      if (running && Date.now() - lastLoopAt > 60_000) return;
+      SecureCamNative.heartbeat(!!running, S.tgToken || '', S.tgChat || '');
+    } catch {}
+  }
+  setInterval(nativeHeartbeat, 30_000);
   // 반복 확인(1분마다): 메인 루프 자체가 끊겼으면 다시 돌린다
   setInterval(() => {
     if (running && Date.now() - lastLoopAt > 30_000) { log('⚠️ 감시 루프 끊김 → 다시 시작', true); loop(); }
@@ -1465,7 +1475,8 @@ async function startCamera() {
       pollCommands();
       $('btnStop').disabled = false;
       log('감시 시작', true);
-      tgText(`🟢 보안캠 감시 시작 · ${fmtDT(Date.now())}\n명령어는 /help`);
+      tgText(`🟢 보안캠 감시 시작 · ${fmtDT(Date.now())}\n명령어는 /help${exitNote}`); exitNote = '';
+      nativeHeartbeat();
     } catch (e) { alert('시작 실패: ' + e.message); log('시작 실패: ' + e.message, true); $('btnStart').disabled = false; }
   };
   function stopAll(silent) {
@@ -1477,6 +1488,7 @@ async function startCamera() {
     try { wakeLock && wakeLock.release(); } catch {}
     octx.clearRect(0, 0, overlay.width, overlay.height); setStatus([]);
     $('btnStart').disabled = false; $('btnStop').disabled = true; setArmBadge();
+    nativeHeartbeat();
     if (!silent) { log('감시 중지', true); tgText(`🔴 보안캠 감시 중지 · ${fmtDT(Date.now())}`); }
   }
   $('btnStop').onclick = () => stopAll(false);
@@ -1536,6 +1548,19 @@ async function startCamera() {
 
   if (!window.isSecureContext) alert('카메라를 쓰려면 https:// 주소로 열어야 합니다.');
   log('준비됨. 얼굴 등록과 텔레그램 설정 후 [감시 시작]을 누르세요.');
+  // 앱(안드로이드)이 알려 주는 지난번 앱 종료 이유 → 밤새 감시가 멈췄을 때 원인 확인용
+  let exitNote = '';
+  try {
+    if (window.SecureCamNative && SecureCamNative.exitReasons) {
+      const ex = JSON.parse(SecureCamNative.exitReasons() || '[]').filter(x => x.proc === 'kr.securecam.app').slice(0, 3);
+      const normal = [10, 16]; // 사용자가 종료, 앱 업데이트
+      for (const x of ex.reverse()) {
+        const line = `📴 지난번 앱 종료: ${x.label} · ${fmtDT(x.t)}${x.desc ? ' · ' + x.desc : ''}`;
+        log(line, !normal.includes(x.reason));
+        if (!normal.includes(x.reason)) exitNote = String.fromCharCode(10) + '(' + line + ')';
+      }
+    }
+  } catch (e) { console.warn(e); }
 }
 
 function rand(n) { const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a, b => 'abcdefghijkmnpqrstuvwxyz23456789'[b % 32]).join(''); }
