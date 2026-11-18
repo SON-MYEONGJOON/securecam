@@ -1214,7 +1214,9 @@ async function startCamera() {
     ev = { start: now, lastSeen: now, maxPersons: persons.length, ownerHits: 0, ownerNames: new Set(), strangerHits: 0, noFaceFrames: 0,
            bestSnap: null, bestScore: -1, lastSnapAt: 0, instantSent: false,
            rec: adoptPreRec(now, S.maxClip) || startRecorder(S.maxClip), preSnap: null };
-    log(`사람 등장 (${persons.length}명)`, true);
+    ev.dim = camHealth.lum < 45;
+    const best = persons.length ? Math.max(...persons.map(p => p.score)) : 0;
+    log(`사람 등장 (${persons.length}명 · 점수 ${best.toFixed(2)}${ev.dim ? ` · 어스름 밝기 ${camHealth.lum.toFixed(0)}` : ''})`, true);
     const e = ev; takePreRollSnap(now).then(p => { e.preSnap = p; }).catch(() => {});
   }
 
@@ -1224,7 +1226,9 @@ async function startCamera() {
     const dur = (e.lastSeen - e.start) / 1000;
     const ownerPresent = e.ownerHits >= 2;
     let suppress = false, reason = '';
-    if (dur < S.minEvent) { suppress = true; reason = '너무 짧음'; }
+    // 어스름할 때는 잡티로 1~2초 반짝 잡히는 오탐이 많아 최소 4초는 보여야 알림
+    const minDur = e.dim ? Math.max(4, S.minEvent) : S.minEvent;
+    if (dur < minDur) { suppress = true; reason = `너무 짧음${e.dim ? ' (어스름, 4초 미만)' : ''}`; }
     else if (!armed) { suppress = true; reason = '일시정지 상태'; }
     else if (S.ownerMode === 'any' && ownerPresent) { suppress = true; reason = `본인 포함 (${[...e.ownerNames].join(', ')})`; }
     else if (S.ownerMode === 'only' && ownerPresent && e.strangerHits === 0) { suppress = true; reason = `본인만 있음 (${[...e.ownerNames].join(', ')})`; }
