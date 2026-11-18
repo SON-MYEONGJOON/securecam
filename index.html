@@ -1224,7 +1224,9 @@ async function startCamera() {
     const e = ev; ev = null; recentPerson = [];
     const clip = e.rec ? await e.rec.stop() : null;
     const dur = (e.lastSeen - e.start) / 1000;
-    const ownerPresent = e.ownerHits >= 2;
+    // 혼자 있었는데 본인 일치보다 '미등록' 판정이 같거나 많으면 본인이라고 믿지 않음 (비슷하게 생긴 다른 사람 오인 방지)
+    const ownerPresent = e.ownerHits >= 2 && !(e.maxPersons <= 1 && e.strangerHits >= e.ownerHits);
+    const faceStat = ` · 얼굴 일치 ${e.ownerHits}회${e.ownerHits ? ` (최고 ${(e.ownerBest || 0).toFixed(2)})` : ''} / 미등록 ${e.strangerHits}회${e.strangerHits ? ` (본인과 비슷한 정도 최고 ${(e.strangerBest || 0).toFixed(2)})` : ''} · 기준 ${S.matchThr}`;
     let suppress = false, reason = '';
     // 어스름할 때는 잡티로 1~2초 반짝 잡히는 오탐이 많아 최소 4초는 보여야 알림
     const minDur = e.dim ? Math.max(4, S.minEvent) : S.minEvent;
@@ -1235,12 +1237,12 @@ async function startCamera() {
     else if (e.startedInGrace && e.strangerHits === 0) { suppress = true; reason = '본인 무시 시간 중 (얼굴 미확인 움직임)'; }
     else if (e.startedInGrace && S.ownerMode === 'any') { suppress = true; reason = '본인 무시 시간 중'; }
 
-    if (suppress) { log(`사람 사라짐 · 알림 안 함: ${reason}`); return; }
+    if (suppress) { log(`사람 사라짐 · 알림 안 함: ${reason}${e.ownerHits || e.strangerHits ? faceStat : ''}`); return; }
 
     const face = e.strangerHits > 0 ? `낯선 얼굴 확인 (${e.strangerHits}회)` : '얼굴 미확인 (뒷모습/멀리)';
     const caption = `🚶 사람이 나타났다 사라졌습니다\n⏱ ${fmtTime(e.start)} ~ ${fmtTime(e.lastSeen)} (${Math.round(dur)}초)\n👤 최대 ${e.maxPersons}명 · ${face}` +
                     (ownerPresent ? `\n(등록된 사람도 함께 있었음: ${[...e.ownerNames].join(', ')})` : '');
-    log(`사람 사라짐 · 알림 전송 (${Math.round(dur)}초, ${face})`, true);
+    log(`사람 사라짐 · 알림 전송 (${Math.round(dur)}초, ${face})${e.ownerHits || e.strangerHits ? faceStat : ''}`, true);
     // 알림은 녹화 영상 하나로 (영상이 등장 순간부터 담고 있으므로). 영상이 없거나 너무 클 때만 사진으로 대신 보냄
     const pre = e.rec ? Math.max(0, Math.round((e.start - e.rec.t0) / 1000)) : 0;
     const vcap = `${caption}
@@ -1370,7 +1372,8 @@ async function startCamera() {
     if (enrolling) { handleEnroll(faces); return; }
 
     // 등록된 사람/낯선 얼굴 판별
-    const known = lastFaces.filter(f => f.id.sim >= S.matchThr);
+    // 너무 작은(멀리 있는·흐린) 얼굴은 본인/낯선 사람 모두 판단 보류 → 작은 얼굴이 우연히 본인과 비슷하게 나와 다른 사람을 본인으로 착각하는 것 방지
+    const known = lastFaces.filter(f => f.id.sim >= S.matchThr && f.w >= 48);
     const strangers = lastFaces.filter(f => f.id.sim < S.matchThr && f.w >= 48); // 너무 작은 얼굴은 판단 보류
     if (known.length) {
       graceUntil = Math.max(graceUntil, now + S.graceMin * 60_000);
@@ -1393,8 +1396,9 @@ async function startCamera() {
         ev.lastSeen = now;
         ev.maxPersons = Math.max(ev.maxPersons, persons.length, faces.length);
       }
-      for (const k of known) { ev.ownerHits++; ev.ownerNames.add(k.id.name); }
+      for (const k of known) { ev.ownerHits++; ev.ownerNames.add(k.id.name); ev.ownerBest = Math.max(ev.ownerBest || 0, k.id.sim); }
       ev.strangerHits += strangers.length;
+      for (const f of strangers) ev.strangerBest = Math.max(ev.strangerBest || 0, f.id.sim);
       if (present && !faces.length) ev.noFaceFrames++;
 
       // 대표 사진: 낯선 얼굴 > 큰 사람 순으로 1초마다 갱신
