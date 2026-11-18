@@ -1342,7 +1342,9 @@ async function startCamera() {
       .map(d => ({ score: d.categories[0].score, box: [d.boundingBox.originX, d.boundingBox.originY, d.boundingBox.width, d.boundingBox.height] }));
     // 사람이 이미 등장한 뒤에는 기준을 낮춰 유지 (앉거나 몸이 일부 가려져도 이벤트가 끊기지 않게).
     // 처음 등장 판단은 원래 기준 그대로라 잘못 잡는 경우는 늘지 않음.
-    const thr = ev ? Math.max(0.2, S.personThr - 0.15) : S.personThr;
+    // 어스름한 화면(불을 끄고 난 직후, 창밖 빛만 있을 때 등)에서는 의자·그림자를 사람으로 잘못 보는 일이 많아 시작 기준을 높인다
+    const dim = camHealth.lum < 45;
+    const thr = ev ? Math.max(0.2, S.personThr - 0.15) : dim ? Math.max(0.55, S.personThr + 0.15) : S.personThr;
     const persons = all.filter(p => p.score >= thr);
     // 놓칠 뻔한 경우 기록: 움직임이 있는데 사람 점수가 기준보다 조금 낮아 무시한 경우 (1분에 한 번)
     if (!persons.length && !ev && curMotion > 0.02 && all.length) {
@@ -1376,7 +1378,11 @@ async function startCamera() {
     recentPerson.push(present); if (recentPerson.length > 3) recentPerson.shift();
     // 사람 점수가 확실히 높으면(0.6 이상) 첫 감지에서 바로 시작 → 녹화가 빨리 시작됨
     const sure = persons.some(p => p.score >= Math.max(0.6, S.personThr + 0.15));
-    if (!ev && (recentPerson.filter(Boolean).length >= 2 || sure)) { await beginEvent(now, persons); ev.startedInGrace = now < graceUntil && !known.length; }
+    // 어스름할 때: 빠른 시작 없이 3번 연속 감지 + 최근 2초 안에 실제 움직임이 있어야 시작 (가만히 있는 물체 오탐 방지)
+    const startOk = dim
+      ? recentPerson.length === 3 && recentPerson.every(Boolean) && now - preRec.lastMotion < 2000
+      : recentPerson.filter(Boolean).length >= 2 || sure;
+    if (!ev && startOk) { await beginEvent(now, persons); ev.startedInGrace = now < graceUntil && !known.length; }
 
     if (ev) {
       if (present) {
